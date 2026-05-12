@@ -1,0 +1,643 @@
+# =============================================================================
+# Cboe Margin Manual — CEL Rules
+# Source: Cboe Margin Manual 2021-11-30. Strategy-based margin.
+# Formulas are CEL (cel-spec.dev) expressions evaluated by cel-go.
+# =============================================================================
+schema_version: "3.0"
+
+source:
+  document: "Cboe Margin Manual"
+  publisher: "Cboe Global Markets, Inc."
+  version_date: "2021-11-30"
+
+# -----------------------------------------------------------------------------
+# CEL environment exposes these to every expression:
+#   Variables:
+#     U      double                       current underlying value
+#     class  string                       rates table key
+#     lev    double                       leverage factor (1.0 if non-leveraged)
+#     legs   map<string, map<string, dyn>>  bound legs by slot name
+#
+#   Custom functions (implemented in Go, registered with cel.NewEnv):
+#     max(double, double) double
+#     min(double, double) double
+#     rate(class, field string) double           lookup into `rates` table
+#     intrinsic_call(K, U double) double
+#     intrinsic_put(K, U double) double
+#     short_call_req(leg, U, class, lev, p) double    full per-position USD requirement
+#     short_put_req(leg, U, class, lev, p) double
+#     mpl(legs) double                            maximum potential loss across legs
+#     sum_long_premiums(legs, field string) double
+#     sum_short_premiums(legs, field string) double
+#
+# Leg fields (accessible via legs.<slot>.<field>):
+#   side, kind, option_type, K, P, P0, qty, mult, style, venue, settle_style,
+#   expiration, underlying, shares, short_sale_proceeds, sale_price, price,
+#   tracks_index, leveraged, broker_guaranteed, time_to_expiration_months,
+#   K_equivalent
+# =============================================================================
+
+rates:
+  equity:             { base_pct: 0.20, min_pct: 0.10 }
+  etf_narrow:         { base_pct: 0.20, min_pct: 0.10 }
+  etn_narrow:         { base_pct: 0.20, min_pct: 0.10 }
+  etn_broad:          { base_pct: 0.20, min_pct: 0.10 }   # note: ETN broad ≠ ETF broad
+  narrow_based_index: { base_pct: 0.20, min_pct: 0.10 }
+  vol_index_narrow:   { base_pct: 0.20, min_pct: 0.10 }
+  vol_index_broad:    { base_pct: 0.20, min_pct: 0.10 }
+  etf_broad:          { base_pct: 0.15, min_pct: 0.10 }
+  broad_based_index:  { base_pct: 0.15, min_pct: 0.10 }
+
+constants:
+  long_option_loan_value_threshold_months: 9
+  long_listed_option_loan_value_pct: 0.75
+  margin_account_min_equity_usd: 2000
+  pdt_min_equity_usd: 25000
+  default_contract_multiplier: 100
+
+# =============================================================================
+# Rules — first one whose match binds and constraints hold, wins.
+# =============================================================================
+rules:
+
+  # ---------------------------------------------------------------------------
+  - id: long_option_short_dated
+    match:
+      legs:
+        - { name: opt, side: long, kind: option }
+      constraints:
+        - "legs.opt.time_to_expiration_months <= 9.0"
+    formulas:
+      cash:
+        initial:     "legs.opt.P0 * legs.opt.qty * legs.opt.mult"
+        maintenance: "0.0"
+      margin:
+        initial:     "legs.opt.P0 * legs.opt.qty * legs.opt.mult"
+        maintenance: "0.0"
+
+  # ---------------------------------------------------------------------------
+  - id: long_option_long_dated_listed
+    match:
+      legs:
+        - { name: opt, side: long, kind: option, venue: listed }
+      constraints:
+        - "legs.opt.time_to_expiration_months > 9.0"
+        # 75% loan value applies only to equity / equity-ETF / index / vol-index
+        # underlyings. ETNs are debt instruments — manual does NOT extend the
+        # 75% allowance to them. A long-dated listed option on an ETN class
+        # therefore falls through this rule and produces a no-match error,
+        # which is the correct outcome until a specific ETN rule is authored.
+        - "class in ['equity', 'etf_narrow', 'etf_broad', 'narrow_based_index', 'broad_based_index', 'vol_index_narrow', 'vol_index_broad']"
+    formulas:
+      cash:
+        initial:     "legs.opt.P0 * legs.opt.qty * legs.opt.mult"
+        maintenance: "0.0"
+      margin:
+        initial:     "0.75 * legs.opt.P * legs.opt.qty * legs.opt.mult"
+        maintenance: "0.75 * legs.opt.P * legs.opt.qty * legs.opt.mult"
+
+  # ---------------------------------------------------------------------------
+  - id: long_option_long_dated_otc
+    match:
+      legs:
+        - { name: opt, side: long, kind: option, venue: otc }
+      constraints:
+        - "legs.opt.time_to_expiration_months > 9.0"
+        - "legs.opt.style == 'american'"
+        - "legs.opt.broker_guaranteed == true"
+    formulas:
+      cash:
+        initial:     "legs.opt.P0 * legs.opt.qty * legs.opt.mult"
+        maintenance: "0.0"
+      margin:
+        initial: |
+          legs.opt.qty * legs.opt.mult * (
+            0.75 * (legs.opt.option_type == 'call'
+                    ? intrinsic_call(legs.opt.K, U)
+                    : intrinsic_put(legs.opt.K, U))
+            + max(0.0, legs.opt.P0 - (legs.opt.option_type == 'call'
+                                       ? intrinsic_call(legs.opt.K, U)
+                                       : intrinsic_put(legs.opt.K, U)))
+          )
+        maintenance: |
+          0.75 * legs.opt.qty * legs.opt.mult * (
+            legs.opt.option_type == 'call'
+            ? intrinsic_call(legs.opt.K, U)
+            : intrinsic_put(legs.opt.K, U)
+          )
+
+  # ---------------------------------------------------------------------------
+  - id: short_call_uncovered
+    match:
+      legs:
+        - { name: opt, side: short, kind: option, option_type: call }
+    formulas:
+      cash:
+        # Manual: deposit the underlying (or escrow receipt). The USD-equivalent
+        # surfaced here is U*qty*mult — i.e. the market value of the deliverable
+        # shares — useful for downstream BP calculations even though the actual
+        # deposit is shares, not cash. The deposit_kind is the authoritative
+        # statement of acceptable collateral forms.
+        initial:              "U * legs.opt.qty * legs.opt.mult"
+        maintenance:          "U * legs.opt.qty * legs.opt.mult"
+        initial_proceeds:     "legs.opt.P0 * legs.opt.qty * legs.opt.mult"
+        maintenance_proceeds: "legs.opt.P  * legs.opt.qty * legs.opt.mult"
+        deposit_kind: "underlying_or_escrow"
+      margin:
+        initial: |
+          legs.opt.qty * legs.opt.mult * (
+            legs.opt.P0
+            + max(
+                rate(class, 'base_pct') * lev * U - max(0.0, legs.opt.K - U),
+                rate(class, 'min_pct')  * lev * U
+              )
+          )
+        maintenance: |
+          legs.opt.qty * legs.opt.mult * (
+            legs.opt.P
+            + max(
+                rate(class, 'base_pct') * lev * U - max(0.0, legs.opt.K - U),
+                rate(class, 'min_pct')  * lev * U
+              )
+          )
+        initial_proceeds:     "legs.opt.P0 * legs.opt.qty * legs.opt.mult"
+        maintenance_proceeds: "legs.opt.P  * legs.opt.qty * legs.opt.mult"
+
+  # ---------------------------------------------------------------------------
+  - id: short_put_uncovered
+    match:
+      legs:
+        - { name: opt, side: short, kind: option, option_type: put }
+    formulas:
+      cash:
+        # Manual: "deposit cash or cash-equivalents equal to the aggregate
+        # exercise price." That is K*qty*mult. The proceeds line still applies
+        # — the customer keeps the premium received and it offsets the deposit
+        # in the cash_call sense.
+        initial:              "legs.opt.K * legs.opt.qty * legs.opt.mult"
+        maintenance:          "legs.opt.K * legs.opt.qty * legs.opt.mult"
+        initial_proceeds:     "legs.opt.P0 * legs.opt.qty * legs.opt.mult"
+        maintenance_proceeds: "legs.opt.P  * legs.opt.qty * legs.opt.mult"
+        deposit_kind: "cash_or_escrow"
+      margin:
+        initial: |
+          legs.opt.qty * legs.opt.mult * (
+            legs.opt.P0
+            + max(
+                rate(class, 'base_pct') * lev * U - max(0.0, U - legs.opt.K),
+                rate(class, 'min_pct')  * lev * legs.opt.K
+              )
+          )
+        maintenance: |
+          legs.opt.qty * legs.opt.mult * (
+            legs.opt.P
+            + max(
+                rate(class, 'base_pct') * lev * U - max(0.0, U - legs.opt.K),
+                rate(class, 'min_pct')  * lev * legs.opt.K
+              )
+          )
+        initial_proceeds:     "legs.opt.P0 * legs.opt.qty * legs.opt.mult"
+        maintenance_proceeds: "legs.opt.P  * legs.opt.qty * legs.opt.mult"
+
+  # ---------------------------------------------------------------------------
+  - id: short_strangle_or_straddle
+    match:
+      legs:
+        - { name: sp, side: short, kind: option, option_type: put }
+        - { name: sc, side: short, kind: option, option_type: call }
+      constraints:
+        - "legs.sp.underlying == legs.sc.underlying"
+        - "legs.sp.mult == legs.sc.mult"
+    formulas:
+      cash:
+        # An uncovered short straddle/strangle cannot be cash-secured by a
+        # single deposit: the put and call require different collateral
+        # (aggregate strike vs. underlying shares). The manual treats this as
+        # a margin-account-only structure; if each leg is independently covered
+        # via escrow, it should be entered as two separate covered positions.
+        permitted: false
+      margin:
+        initial: |
+          max(short_put_req(legs.sp, U, class, lev, legs.sp.P0),
+              short_call_req(legs.sc, U, class, lev, legs.sc.P0))
+          + (short_put_req(legs.sp, U, class, lev, legs.sp.P0)
+             > short_call_req(legs.sc, U, class, lev, legs.sc.P0)
+             ? legs.sc.P0 * legs.sc.qty * legs.sc.mult
+             : legs.sp.P0 * legs.sp.qty * legs.sp.mult)
+        maintenance: |
+          max(short_put_req(legs.sp, U, class, lev, legs.sp.P),
+              short_call_req(legs.sc, U, class, lev, legs.sc.P))
+          + (short_put_req(legs.sp, U, class, lev, legs.sp.P)
+             > short_call_req(legs.sc, U, class, lev, legs.sc.P)
+             ? legs.sc.P * legs.sc.qty * legs.sc.mult
+             : legs.sp.P * legs.sp.qty * legs.sp.mult)
+        initial_proceeds:     "sum_short_premiums(legs, 'P0')"
+        maintenance_proceeds: "sum_short_premiums(legs, 'P')"
+
+  # ---------------------------------------------------------------------------
+  - id: vertical_spread
+    match:
+      legs:
+        - { name: long_leg, side: long, kind: option }
+        - { name: short_leg, side: short, kind: option }
+      constraints:
+        - "legs.long_leg.option_type == legs.short_leg.option_type"
+        - "legs.long_leg.underlying == legs.short_leg.underlying"
+        - "legs.long_leg.style == legs.short_leg.style"
+        - "legs.long_leg.venue == legs.short_leg.venue"
+        - "legs.short_leg.expiration <= legs.long_leg.expiration"
+        - "legs.long_leg.qty * legs.long_leg.mult == legs.short_leg.qty * legs.short_leg.mult"
+    formulas:
+      cash:
+        # Cash-secured vertical: max loss on deposit + long premium paid.
+        # Mirrors the margin block's gross/proceeds split. The short_leg
+        # premium received is the credit; cash_call = gross - proceeds gives
+        # the net cash actually out of pocket.
+        initial: |
+          mpl(legs)
+          + legs.long_leg.P0 * legs.long_leg.qty * legs.long_leg.mult
+        maintenance: |
+          mpl(legs)
+          + legs.long_leg.P * legs.long_leg.qty * legs.long_leg.mult
+        initial_proceeds:     "legs.short_leg.P0 * legs.short_leg.qty * legs.short_leg.mult"
+        maintenance_proceeds: "legs.short_leg.P  * legs.short_leg.qty * legs.short_leg.mult"
+      margin:
+        # GROSS margin requirement (manual convention):
+        #   min(naked-short req, max-potential-loss) + long premium paid
+        # Short premium received is the credit, surfaced as applied_proceeds.
+        # The engine computes cash_call = initial - initial_proceeds.
+        initial: |
+          min(
+            legs.short_leg.option_type == 'call'
+              ? short_call_req(legs.short_leg, U, class, lev, legs.short_leg.P0)
+              : short_put_req(legs.short_leg, U, class, lev, legs.short_leg.P0),
+            mpl(legs)
+          )
+          + legs.long_leg.P0 * legs.long_leg.qty * legs.long_leg.mult
+        maintenance: |
+          min(
+            legs.short_leg.option_type == 'call'
+              ? short_call_req(legs.short_leg, U, class, lev, legs.short_leg.P)
+              : short_put_req(legs.short_leg, U, class, lev, legs.short_leg.P),
+            mpl(legs)
+          )
+          + legs.long_leg.P * legs.long_leg.qty * legs.long_leg.mult
+        initial_proceeds:     "legs.short_leg.P0 * legs.short_leg.qty * legs.short_leg.mult"
+        maintenance_proceeds: "legs.short_leg.P  * legs.short_leg.qty * legs.short_leg.mult"
+
+  # ---------------------------------------------------------------------------
+  - id: long_box_spread
+    match:
+      legs:
+        - { name: bc, side: long,  kind: option, option_type: call }   # buy @ K_low
+        - { name: bp, side: short, kind: option, option_type: put }    # buy @ K_low
+        - { name: sp, side: long,  kind: option, option_type: put }    # sell @ K_high
+        - { name: sc, side: short, kind: option, option_type: call }   # sell @ K_high
+      constraints:
+        - "legs.bc.K == legs.bp.K"
+        - "legs.sp.K == legs.sc.K"
+        - "legs.bc.K < legs.sp.K"
+        - "legs.bc.expiration == legs.bp.expiration"
+        - "legs.bp.expiration == legs.sp.expiration"
+        - "legs.sp.expiration == legs.sc.expiration"
+    formulas:
+      # No cash block. American boxes COULD be cash-secured (net debit on
+      # deposit) but European boxes rely on the loan-value mechanism which
+      # is a margin-account-only path. Splitting into style-specific cash
+      # treatment is left for when a concrete cash-box use case arrives.
+      margin:
+        # American: requirement = MPL + sum_long_premiums (gross).
+        # European loan-value path is itself the requirement (50% of strike
+        # spread), with no separate proceeds since the manual treats it as a
+        # debit balance; we still surface proceeds for consistency.
+        initial: |
+          legs.bc.style == 'european'
+          ? 0.50 * (legs.sp.K - legs.bc.K) * legs.bc.qty * legs.bc.mult
+          : mpl(legs)
+            + legs.bc.P0 * legs.bc.qty * legs.bc.mult
+            + legs.sp.P0 * legs.sp.qty * legs.sp.mult
+        maintenance: |
+          legs.bc.style == 'european'
+          ? 0.50 * (legs.sp.K - legs.bc.K) * legs.bc.qty * legs.bc.mult
+          : mpl(legs)
+            + legs.bc.P * legs.bc.qty * legs.bc.mult
+            + legs.sp.P * legs.sp.qty * legs.sp.mult
+        initial_proceeds: |
+          legs.bc.style == 'european'
+          ? 0.0
+          : legs.bp.P0 * legs.bp.qty * legs.bp.mult
+            + legs.sc.P0 * legs.sc.qty * legs.sc.mult
+        maintenance_proceeds: |
+          legs.bc.style == 'european'
+          ? 0.0
+          : legs.bp.P * legs.bp.qty * legs.bp.mult
+            + legs.sc.P * legs.sc.qty * legs.sc.mult
+
+  # ---------------------------------------------------------------------------
+  - id: short_box_spread
+    match:
+      legs:
+        - { name: bc, side: long,  kind: option, option_type: call }   # buy @ K_high
+        - { name: bp, side: short, kind: option, option_type: put  }   # buy @ K_high
+        - { name: sp, side: long,  kind: option, option_type: put  }   # sell @ K_low
+        - { name: sc, side: short, kind: option, option_type: call }   # sell @ K_low
+      constraints:
+        - "legs.bc.K == legs.bp.K"
+        - "legs.sp.K == legs.sc.K"
+        - "legs.bc.K > legs.sp.K"
+        - "legs.bc.expiration == legs.sc.expiration"
+    formulas:
+      cash:
+        # Cash-secured short box: max loss on deposit. Mirrors the margin
+        # block shape exactly — the cash requirement IS the gross "max loss"
+        # since both legs of the short pair are equally collateralised.
+        initial:              "mpl(legs)"
+        maintenance:          "mpl(legs)"
+        initial_proceeds:     "sum_short_premiums(legs, 'P0')"
+        maintenance_proceeds: "sum_short_premiums(legs, 'P')"
+      margin:
+        initial:              "mpl(legs)"
+        maintenance:          "mpl(legs)"
+        initial_proceeds:     "sum_short_premiums(legs, 'P0')"
+        maintenance_proceeds: "sum_short_premiums(legs, 'P')"
+
+  # ---------------------------------------------------------------------------
+  - id: short_put_short_stock
+    match:
+      legs:
+        - { name: sp, side: short, kind: option, option_type: put }
+        - { name: ss, side: short, kind: stock }
+    formulas:
+      cash:
+        permitted: false
+      margin:
+        initial: |
+          legs.ss.short_sale_proceeds
+          + 0.50 * U * legs.ss.shares
+          + max(0.0, legs.sp.K - U) * legs.ss.shares
+        maintenance: |
+          U * legs.ss.shares
+          + (U < 5.0
+              ? max(2.50 * legs.ss.shares, U * legs.ss.shares)
+              : max(5.00 * legs.ss.shares, 0.30 * U * legs.ss.shares))
+          + max(0.0, legs.sp.K - U) * legs.ss.shares
+        initial_proceeds:     "legs.sp.P0 * legs.sp.qty * legs.sp.mult"
+        maintenance_proceeds: "legs.sp.P  * legs.sp.qty * legs.sp.mult"
+
+  # ---------------------------------------------------------------------------
+  - id: covered_call
+    match:
+      legs:
+        - { name: sc, side: short, kind: option, option_type: call }
+        - { name: ls, side: long,  kind: stock }
+    formulas:
+      cash:
+        initial:     "U * legs.ls.shares"
+        maintenance: "0.0"
+      margin:
+        initial:              "0.50 * U * legs.ls.shares"
+        maintenance:          "0.25 * min(U, legs.sc.K) * legs.ls.shares"
+        initial_proceeds:     "legs.sc.P0 * legs.sc.qty * legs.sc.mult"
+        maintenance_proceeds: "legs.sc.P  * legs.sc.qty * legs.sc.mult"
+
+  # ---------------------------------------------------------------------------
+  - id: short_index_call_long_etf
+    match:
+      legs:
+        - { name: sc, side: short, kind: option, option_type: call }
+        - { name: le, side: long,  kind: etf }
+      constraints:
+        - "legs.le.tracks_index == legs.sc.underlying"
+        - "legs.le.shares * legs.le.price >= U * legs.sc.mult"
+        - "legs.le.leveraged == false"
+    formulas:
+      cash:
+        permitted: false
+      margin:
+        initial:              "0.50 * legs.le.price * legs.le.shares"
+        maintenance:          "0.25 * min(legs.le.price, legs.sc.K_equivalent) * legs.le.shares"
+        initial_proceeds:     "legs.sc.P0 * legs.sc.qty * legs.sc.mult"
+        maintenance_proceeds: "legs.sc.P  * legs.sc.qty * legs.sc.mult"
+
+  # ---------------------------------------------------------------------------
+  - id: protective_put
+    match:
+      legs:
+        - { name: lp, side: long, kind: option, option_type: put }
+        - { name: ls, side: long, kind: stock }
+      constraints:
+        - "legs.lp.style == 'american'"
+    formulas:
+      cash:
+        initial:     "U * legs.ls.shares + legs.lp.P0 * legs.lp.qty * legs.lp.mult"
+        maintenance: "0.0"
+      margin:
+        initial:     "legs.lp.P0 * legs.lp.qty * legs.lp.mult + 0.50 * U * legs.ls.shares"
+        maintenance: |
+          min(
+            (0.10 * legs.lp.K + max(0.0, U - legs.lp.K)) * legs.ls.shares,
+            0.25 * U * legs.ls.shares
+          )
+
+  # ---------------------------------------------------------------------------
+  - id: long_call_short_stock
+    match:
+      legs:
+        - { name: lc, side: long,  kind: option, option_type: call }
+        - { name: ss, side: short, kind: stock }
+      constraints:
+        - "legs.lc.style == 'american'"
+    formulas:
+      cash:
+        permitted: false
+      margin:
+        initial: |
+          legs.lc.P0 * legs.lc.qty * legs.lc.mult
+          + legs.ss.short_sale_proceeds
+          + 0.50 * U * legs.ss.shares
+        maintenance: |
+          U * legs.ss.shares
+          + min(
+              (0.10 * legs.lc.K + max(0.0, legs.lc.K - U)) * legs.ss.shares,
+              U < 5.0
+                ? max(2.50 * legs.ss.shares, U * legs.ss.shares)
+                : max(5.00 * legs.ss.shares, 0.30 * U * legs.ss.shares)
+            )
+
+  # ---------------------------------------------------------------------------
+  - id: conversion
+    match:
+      legs:
+        - { name: lp, side: long,  kind: option, option_type: put }
+        - { name: sc, side: short, kind: option, option_type: call }
+        - { name: ls, side: long,  kind: stock }
+      constraints:
+        - "legs.lp.K == legs.sc.K"
+        - "legs.lp.expiration == legs.sc.expiration"
+        - "legs.lp.style == 'american'"
+        - "legs.sc.style == 'american'"
+    formulas:
+      cash:
+        initial:     "U * legs.ls.shares + legs.lp.P0 * legs.lp.qty * legs.lp.mult"
+        maintenance: "0.0"
+      margin:
+        initial:              "0.50 * U * legs.ls.shares + legs.lp.P0 * legs.lp.qty * legs.lp.mult"
+        maintenance:          "0.10 * legs.lp.K * legs.ls.shares"
+        initial_proceeds:     "legs.sc.P0 * legs.sc.qty * legs.sc.mult"
+        maintenance_proceeds: "legs.sc.P  * legs.sc.qty * legs.sc.mult"
+
+  # ---------------------------------------------------------------------------
+  - id: reverse_conversion
+    match:
+      legs:
+        - { name: lc, side: long,  kind: option, option_type: call }
+        - { name: sp, side: short, kind: option, option_type: put  }
+        - { name: ss, side: short, kind: stock }
+      constraints:
+        - "legs.lc.K == legs.sp.K"
+        - "legs.lc.expiration == legs.sp.expiration"
+        - "legs.lc.style == 'american'"
+        - "legs.sp.style == 'american'"
+    formulas:
+      cash:
+        permitted: false
+      margin:
+        initial: |
+          legs.lc.P0 * legs.lc.qty * legs.lc.mult
+          + legs.ss.short_sale_proceeds
+          + (legs.lc.K < legs.ss.sale_price
+             ? 0.10 * legs.lc.K * legs.ss.shares
+             : 0.50 * U * legs.ss.shares)
+        maintenance: |
+          1.10 * legs.lc.K * legs.ss.shares
+          + max(0.0, legs.sp.K - U) * legs.ss.shares
+        initial_proceeds:     "legs.sp.P0 * legs.sp.qty * legs.sp.mult"
+        maintenance_proceeds: "legs.sp.P  * legs.sp.qty * legs.sp.mult"
+
+  # ---------------------------------------------------------------------------
+  - id: collar
+    match:
+      legs:
+        - { name: lp, side: long,  kind: option, option_type: put  }
+        - { name: sc, side: short, kind: option, option_type: call }
+        - { name: ls, side: long,  kind: stock }
+      constraints:
+        - "legs.lp.expiration == legs.sc.expiration"
+        - "legs.lp.K < legs.sc.K"
+        - "legs.lp.style == 'american'"
+        - "legs.sc.style == 'american'"
+    formulas:
+      cash:
+        initial:     "U * legs.ls.shares + legs.lp.P0 * legs.lp.qty * legs.lp.mult"
+        maintenance: "0.0"
+      margin:
+        initial:     "legs.lp.P0 * legs.lp.qty * legs.lp.mult + 0.50 * U * legs.ls.shares"
+        maintenance: |
+          min(
+            (0.10 * legs.lp.K + max(0.0, U - legs.lp.K)) * legs.ls.shares,
+            0.25 * legs.sc.K * legs.ls.shares
+          )
+        initial_proceeds:     "legs.sc.P0 * legs.sc.qty * legs.sc.mult"
+        maintenance_proceeds: "legs.sc.P  * legs.sc.qty * legs.sc.mult"
+
+  # ---------------------------------------------------------------------------
+  # Short Call + Long Marginable Convertible Security (manual p.14)
+  # Convertible must be immediately convertible/exchangeable, may not expire
+  # before the short call, and no money payable upon exchange.
+  # Leg fields used:
+  #   conv.price        market value per convertible unit
+  #   conv.shares       number of convertible units
+  #   conv.K_equivalent call exercise price (used in maintenance valuation cap)
+  # ---------------------------------------------------------------------------
+  - id: short_call_long_convertible
+    match:
+      legs:
+        - { name: sc,   side: short, kind: option,      option_type: call }
+        - { name: conv, side: long,  kind: convertible }
+    formulas:
+      cash:
+        # "Pay for the convertible security in full."
+        initial:     "legs.conv.price * legs.conv.shares"
+        maintenance: "0.0"
+      margin:
+        # None required on short call; 50% on convertible.
+        initial:              "0.50 * legs.conv.price * legs.conv.shares"
+        # 25% on convertible, valued at lower of market or call exercise price.
+        maintenance:          "0.25 * min(legs.conv.price, legs.sc.K) * legs.conv.shares"
+        initial_proceeds:     "legs.sc.P0 * legs.sc.qty * legs.sc.mult"
+        maintenance_proceeds: "legs.sc.P  * legs.sc.qty * legs.sc.mult"
+
+  # ---------------------------------------------------------------------------
+  # Short Call + Long Marginable Stock Warrant (manual p.14)
+  # Per Cboe rules, warrants spread with a short call contribute no loan value,
+  # so the Exchange maintenance requirement is both initial and maintenance.
+  # Leg fields used:
+  #   wt.price        market value per warrant
+  #   wt.shares       number of warrants
+  #   wt.K_equivalent warrant exercise price
+  # ---------------------------------------------------------------------------
+  - id: short_call_long_warrant
+    match:
+      legs:
+        - { name: sc, side: short, kind: option,  option_type: call }
+        - { name: wt, side: long,  kind: warrant }
+    formulas:
+      cash:
+        # Not permitted in a cash account.
+        permitted: false
+      margin:
+        # 100% of warrant value + any amount by which the warrant exercise
+        # price exceeds the call exercise price (per share, times share count).
+        initial: |
+          legs.wt.price * legs.wt.shares
+          + max(0.0, legs.wt.K_equivalent - legs.sc.K) * legs.wt.shares
+        # Warrants valued at lower of market or call exercise price for the
+        # 100% component; OTM-warrant amount carried as-is.
+        maintenance: |
+          min(legs.wt.price, legs.sc.K) * legs.wt.shares
+          + max(0.0, legs.wt.K_equivalent - legs.sc.K) * legs.wt.shares
+        initial_proceeds:     "legs.sc.P0 * legs.sc.qty * legs.sc.mult"
+        maintenance_proceeds: "legs.sc.P  * legs.sc.qty * legs.sc.mult"
+
+  # ---------------------------------------------------------------------------
+  # Catch-all for butterflies, condors, iron butterflies, iron condors,
+  # broken wings, and any other multi-leg limited-risk option-only structure.
+  # Engine tries this only after every specific rule above has failed.
+  # ---------------------------------------------------------------------------
+  - id: generic_limited_risk_combo
+    match:
+      legs_pattern: all_options
+      min_legs: 3
+      max_legs: 8
+      # Guard: refuse to apply this catch-all unless the option-only payoff is
+      # provably bounded at both tails. Net-short-call structures (e.g. ratio
+      # spreads with more shorts than longs) would otherwise silently get an
+      # MPL computed only at the existing strikes — missing the U→∞ blow-up.
+      constraints:
+        - is_limited_risk(legs)
+    formulas:
+      cash:
+        # Cash-secured multi-leg limited-risk combo: max loss on deposit plus
+        # long premium paid (mirrors margin block — both legs of any short
+        # pair must already be offset by a long leg for is_limited_risk to
+        # hold, so cash-collateralisation = margin-collateralisation here).
+        initial: |
+          mpl(legs)
+          + sum_long_premiums(legs, 'P0')
+        maintenance: |
+          mpl(legs)
+          + sum_long_premiums(legs, 'P')
+        initial_proceeds:     "sum_short_premiums(legs, 'P0')"
+        maintenance_proceeds: "sum_short_premiums(legs, 'P')"
+      margin:
+        # Gross requirement = max-potential-loss + total long premium paid.
+        # Short premiums received are surfaced as applied_proceeds so the
+        # engine can compute cash_call = requirement - proceeds.
+        initial: |
+          mpl(legs)
+          + sum_long_premiums(legs, 'P0')
+        maintenance: |
+          mpl(legs)
+          + sum_long_premiums(legs, 'P')
+        initial_proceeds:     "sum_short_premiums(legs, 'P0')"
+        maintenance_proceeds: "sum_short_premiums(legs, 'P')"

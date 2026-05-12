@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>margincalc — Roadmap</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161922;
+    --border: #262a36;
+    --text: #e6e8ee;
+    --muted: #9aa3b2;
+    --accent: #7ab8ff;
+    --good: #58c994;
+    --warn: #e3b341;
+    --bad: #ef6b6b;
+    --code-bg: #0b0d12;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.55;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 48px 24px 96px; }
+  header h1 { font-size: 32px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  header .sub { color: var(--muted); font-size: 15px; }
+  h2 {
+    margin: 40px 0 16px;
+    font-size: 20px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+  h3 { margin: 24px 0 8px; font-size: 16px; }
+  p, li { font-size: 14.5px; }
+  code, .mono {
+    font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    font-size: 13px;
+    background: var(--code-bg);
+    padding: 1px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    font-size: 12.5px;
+  }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 13.5px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; }
+  .item {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 18px;
+    margin: 12px 0;
+  }
+  .item .head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 6px;
+  }
+  .item .num {
+    color: var(--accent);
+    font-family: "SF Mono", ui-monospace, monospace;
+    font-size: 13px;
+  }
+  .item .title { font-weight: 600; font-size: 15px; }
+  .item .meta { margin-left: auto; color: var(--muted); font-size: 12.5px; }
+  .pill {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 10px;
+    font-size: 11.5px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+  }
+  .pill.done { color: var(--good); border-color: rgba(88,201,148,.4); }
+  .pill.next { color: var(--accent); border-color: rgba(122,184,255,.4); }
+  .pill.later { color: var(--warn); border-color: rgba(227,179,65,.4); }
+  .pill.deferred { color: var(--bad); border-color: rgba(239,107,107,.4); }
+  ul { padding-left: 22px; }
+  .muted { color: var(--muted); }
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .col h4 { margin: 0 0 6px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  hr { border: 0; border-top: 1px solid var(--border); margin: 16px 0; }
+  .footnote { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>margincalc — roadmap</h1>
+  <div class="sub">Strategy-based RegT engine today; account aggregator and risk-based layer next.</div>
+</header>
+
+<h2>Where we are</h2>
+<div class="item">
+  <p><b>Done:</b> per-position RegT calculator. 22 strategies from the Cboe Manual (Nov 2021) reproduce exactly. CEL-based YAML rule file; 27 tests passing.</p>
+  <p>Each evaluation returns three numbers per the manual's distinction:</p>
+  <ul>
+    <li><span class="mono">Requirement</span> — gross "Margin Requirement"</li>
+    <li><span class="mono">AppliedProceeds</span> — short-option premium credit</li>
+    <li><span class="mono">CashCall</span> — net cash the customer must deposit</li>
+  </ul>
+  <p><b>Recently shipped in this session:</b></p>
+  <ul>
+    <li><span class="mono">is_limited_risk(legs)</span> guard on <span class="mono">generic_limited_risk_combo</span> — net-short-call structures now correctly refuse to match instead of getting a fabricated finite MPL.</li>
+    <li>Cash-account coverage: <span class="mono">short_put_uncovered</span>, <span class="mono">short_call_uncovered</span>, <span class="mono">vertical_spread</span>, <span class="mono">short_box_spread</span>, <span class="mono">short_strangle_or_straddle</span>, <span class="mono">generic_limited_risk_combo</span>. Engine now returns numeric + <span class="mono">DepositKind</span> together.</li>
+  </ul>
+</div>
+
+<h2>Scope frame: what Sterling has, what we have</h2>
+<p>Sterling Risk Monitor exposes a much wider surface area. Useful as the target picture even though we're starting much smaller.</p>
+<table>
+  <tr><th>Layer</th><th>Sterling</th><th>margincalc today</th></tr>
+  <tr><td>Engines (per account type)</td><td>Regt, CPM, Cash, IRA, SPAN, RBH_BD, RBH_MM, EXEC</td><td>Regt only</td></tr>
+  <tr><td>Position-level requirement</td><td>Yes</td><td>Yes</td></tr>
+  <tr><td>Account-level aggregates</td><td>SOD Equity, LMV/SMV (stock & option), Net MV, Adjusted Balance, Net Capital, …</td><td>None</td></tr>
+  <tr><td>House Policy overlays</td><td>Vol, low-price, market-cap, ADV add-ons</td><td>None</td></tr>
+  <tr><td>Cross-position decomp</td><td>"Universal Spread Rule" — 2-leg pair-up via optimal path</td><td>None (single-position only)</td></tr>
+  <tr><td>Risk shocks</td><td>±20%/±50%, ±3σ, single-name 50%, worst-case</td><td>None</td></tr>
+  <tr><td>Horizon, Pin, Liquidity, VaR</td><td>Yes</td><td>None</td></tr>
+</table>
+
+<h2>Roadmap</h2>
+
+<div class="item">
+  <div class="head">
+    <span class="num">01</span>
+    <span class="title">Class-scope fix on <span class="mono">long_option_long_dated_listed</span></span>
+    <span class="meta"><span class="pill next">next</span> · ~10 min</span>
+  </div>
+  <p>Manual restricts 75% loan value to equity / equity-based ETF / index / volatility classes. The current rule applies to any listed option &gt;9mo. Add a <span class="mono">class</span> constraint. Last clean item from the original reviewer's correctness list.</p>
+</div>
+
+<div class="item">
+  <div class="head">
+    <span class="num">02</span>
+    <span class="title">Account aggregator (LMV / SMV / Equity / Adjusted Balance)</span>
+    <span class="meta"><span class="pill next">next</span> · ~half-day</span>
+  </div>
+  <p>New <span class="mono">Account</span> type holding <span class="mono">[]Position</span>, plus an <span class="mono">Aggregate(account)</span> function. Use Sterling's exact field names so reconciliation is apples-to-apples:</p>
+<pre>type AccountSnapshot struct {
+    SODEquity        float64
+    PnL              float64
+    CurrentEquity    float64
+    LMVStock         float64
+    LMVOption        float64
+    SMVStock         float64
+    SMVOption        float64
+    NetMV            float64   // LMV - |SMV|
+    AdjustedBalance  float64   // Equity - LMV + |SMV Option|
+    GrossExposure   float64
+    StockLeverage   float64
+    EquityRatio     float64   // Σ requirements / Equity
+}</pre>
+  <p>Unblocks every overlay and gives you the vocabulary to reconcile against vendor screens.</p>
+</div>
+
+<div class="item">
+  <div class="head">
+    <span class="num">03</span>
+    <span class="title">Reconciliation harness</span>
+    <span class="meta"><span class="pill next">next</span> · ~couple hours</span>
+  </div>
+  <p>CSV-in / CSV-out diff tool. Take vendor account-level and per-position numbers, run them through the engine, emit a diff. This is the only thing that'll tell you whether the engine actually matches vendor numbers on real positions. Run nightly.</p>
+</div>
+
+<div class="item">
+  <div class="head">
+    <span class="num">04</span>
+    <span class="title">Rule-set versioning + audit trail</span>
+    <span class="meta"><span class="pill later">later</span></span>
+  </div>
+  <p><span class="mono">Result</span> carries the rule-file SHA. A number from yesterday is reproducible. Cheap now, painful to retrofit. Persist evaluation inputs + outputs to a sqlite/parquet log.</p>
+</div>
+
+<div class="item">
+  <div class="head">
+    <span class="num">05</span>
+    <span class="title">House Policy overlays</span>
+    <span class="meta"><span class="pill later">later</span></span>
+  </div>
+  <p>Match Sterling's four overlay categories so risk users have something to configure:</p>
+  <ul>
+    <li>Vol-based add-on (HV/IV thresholds)</li>
+    <li>Stock-price floor (low-priced stocks)</li>
+    <li>Market-cap add-on</li>
+    <li>ADV / volume add-on</li>
+  </ul>
+  <p>Architecturally these are post-rule modifiers applied on top of the base engine's number.</p>
+</div>
+
+<div class="item">
+  <div class="head">
+    <span class="num">06</span>
+    <span class="title">Risk-shock engine ("poor-man's PM")</span>
+    <span class="meta"><span class="pill later">later</span></span>
+  </div>
+  <p>Delta-based scenario shocks — no vol surface needed:</p>
+  <ul>
+    <li>Percent Stress: ±20% price, ±50% vol</li>
+    <li>Std-Dev Stress: ±3σ, ±20% vol</li>
+    <li>Single Name: ±50% price, ±50% vol</li>
+    <li>Worst Case = max of the three</li>
+    <li>+ Liquidity Risk = 5% × position value × (qty / 30-day ADV) when qty &gt; ADV</li>
+  </ul>
+  <p>Gives a TIMS-shaped number well before there's a real TIMS. Useful as a sanity check.</p>
+</div>
+
+<div class="item">
+  <div class="head">
+    <span class="num">07</span>
+    <span class="title">Universal Spread Rule (cross-position decomp)</span>
+    <span class="meta"><span class="pill later">later</span></span>
+  </div>
+  <p>Per Sterling: strategy matching has a uniqueness problem on complex portfolios. Replace it with optimal pair-up of shorts to longs as 2-leg spreads, sum the resulting requirements. This is also a prerequisite for proper portfolio-level RegT (multiple positions sharing offsets).</p>
+</div>
+
+<div class="item">
+  <div class="head">
+    <span class="num">08</span>
+    <span class="title">Full TIMS / pricing layer</span>
+    <span class="meta"><span class="pill deferred">deferred</span> · big swing</span>
+  </div>
+  <p>Real portfolio margin: OCC scenario grid, vol surface, binomial pricing for American options. Whole separate project. Defer until everything above reconciles against the vendor.</p>
+</div>
+
+<h2>Things explicitly deferred</h2>
+<ul>
+  <li><b>FLEX option exception handling</b> — broker-policy-driven; not in CBOE manual's universal scope.</li>
+  <li><b>European long box cash treatment</b> — relies on loan-value mechanism (margin-account only); no clean cash formula.</li>
+  <li><b>Day-trading / PDT</b> — separate FINRA rule, separate engine surface.</li>
+  <li><b>Horizon / Pin / VaR views</b> — Sterling has them but they're consumers of the same underlying state, not new engines.</li>
+</ul>
+
+<h2>Sequencing logic</h2>
+<p>The middle items (#4 – #7) are all valuable but only matter once a small set of foundations land:</p>
+<ol>
+  <li>Engine correctness on per-position numbers (#1).</li>
+  <li>Account vocabulary that matches the vendor (#2).</li>
+  <li>Evidence that the engine actually agrees with the vendor (#3).</li>
+</ol>
+<p>With those three, every later piece is verifiable against an existing source of truth. Without them, building #4–#7 just produces unfalsifiable numbers.</p>
+
+<hr>
+<div class="footnote">Generated 2026-05-12. Living doc — edit freely as the project advances.</div>
+
+</div>
+</body>
+</html>
