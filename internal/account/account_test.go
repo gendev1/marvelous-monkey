@@ -37,8 +37,8 @@ func assertInvalidAccount(t *testing.T, err error) {
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
-	if !strings.HasPrefix(err.Error(), "invalid account") {
-		t.Fatalf("expected error prefixed with %q, got: %v", "invalid account", err)
+	if !strings.HasPrefix(err.Error(), "invalid account:") {
+		t.Fatalf("expected error prefixed with %q, got: %v", "invalid account:", err)
 	}
 }
 
@@ -197,6 +197,49 @@ func TestValidate_rejectsBadStockLikeLeg(t *testing.T) {
 		t.Run(string(k)+"/Shares=0", func(t *testing.T) {
 			a := minimalAccount()
 			a.Positions = []AccountPosition{stockLikePosition(k, 50, 0)}
+			assertInvalidAccount(t, validate(a))
+		})
+	}
+}
+
+func TestValidate_rejectsNonFiniteLegInputs(t *testing.T) {
+	nonFinite := []struct {
+		name string
+		val  float64
+	}{
+		{"NaN", math.NaN()},
+		{"+Inf", math.Inf(1)},
+		{"-Inf", math.Inf(-1)},
+	}
+	for _, nf := range nonFinite {
+		t.Run("option/P/"+nf.name, func(t *testing.T) {
+			a := minimalAccount()
+			a.Positions = []AccountPosition{optionPosition(nf.val, 1)}
+			assertInvalidAccount(t, validate(a))
+		})
+		t.Run("option/Qty/"+nf.name, func(t *testing.T) {
+			a := minimalAccount()
+			a.Positions = []AccountPosition{optionPosition(1, nf.val)}
+			assertInvalidAccount(t, validate(a))
+		})
+		t.Run("stock/Shares/"+nf.name, func(t *testing.T) {
+			a := minimalAccount()
+			a.Positions[0].Position.Legs[0].Shares = nf.val
+			assertInvalidAccount(t, validate(a))
+		})
+		t.Run("stock/U/"+nf.name, func(t *testing.T) {
+			a := minimalAccount()
+			a.Positions[0].Position.U = nf.val
+			assertInvalidAccount(t, validate(a))
+		})
+		t.Run("etf/Price/"+nf.name, func(t *testing.T) {
+			a := minimalAccount()
+			a.Positions = []AccountPosition{stockLikePosition(engine.ETFKind, nf.val, 10)}
+			assertInvalidAccount(t, validate(a))
+		})
+		t.Run("etf/Shares/"+nf.name, func(t *testing.T) {
+			a := minimalAccount()
+			a.Positions = []AccountPosition{stockLikePosition(engine.ETFKind, 50, nf.val)}
 			assertInvalidAccount(t, validate(a))
 		})
 	}

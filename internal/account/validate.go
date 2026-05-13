@@ -22,8 +22,8 @@ var recognizedKinds = []engine.Kind{
 // Margin-rule input shape is engine.validateRuleInputs's job
 // (internal/engine/rulebook.go:460) and is intentionally not duplicated here.
 //
-// All errors are wrapped with an "invalid account: …" prefix to mirror the
-// engine's "invalid position: …" convention so callers can string-classify.
+// Every error starts with the literal prefix "invalid account:" so callers
+// can string-classify, mirroring the engine's "invalid position:" convention.
 func validate(account Account) error {
 	if account.ID == "" {
 		return fmt.Errorf("invalid account: ID is required")
@@ -32,14 +32,14 @@ func validate(account Account) error {
 	switch account.AccountType {
 	case engine.CashAccount, engine.MarginAccount:
 	default:
-		return fmt.Errorf("invalid account %q: account_type %q not in {%q, %q}",
+		return fmt.Errorf("invalid account: id=%q account_type=%q not in {%q, %q}",
 			account.ID, account.AccountType, engine.CashAccount, engine.MarginAccount)
 	}
 
 	switch account.Phase {
 	case engine.Initial, engine.Maintenance:
 	default:
-		return fmt.Errorf("invalid account %q: phase %q not in {%q, %q}",
+		return fmt.Errorf("invalid account: id=%q phase=%q not in {%q, %q}",
 			account.ID, account.Phase, engine.Initial, engine.Maintenance)
 	}
 
@@ -52,8 +52,8 @@ func validate(account Account) error {
 		{"pnl", account.PnL},
 		{"deposits_withdrawals", account.DepositsWithdrawals},
 	} {
-		if math.IsNaN(f.val) || math.IsInf(f.val, 0) {
-			return fmt.Errorf("invalid account %q: %s is not finite", account.ID, f.name)
+		if !isFinite(f.val) {
+			return fmt.Errorf("invalid account: id=%q %s is not finite", account.ID, f.name)
 		}
 	}
 
@@ -63,7 +63,7 @@ func validate(account Account) error {
 			continue
 		}
 		if _, dup := seen[p.ID]; dup {
-			return fmt.Errorf("invalid account %q: duplicate position id %q", account.ID, p.ID)
+			return fmt.Errorf("invalid account: id=%q duplicate position id %q", account.ID, p.ID)
 		}
 		seen[p.ID] = struct{}{}
 	}
@@ -97,46 +97,74 @@ func validateLeg(accountID, posLabel string, j int, leg engine.Leg, pos engine.P
 	switch leg.Side {
 	case engine.Long, engine.Short:
 	default:
-		return fmt.Errorf("invalid account %q: %s leg[%d]: side %q not in {%q, %q}",
+		return fmt.Errorf("invalid account: id=%q %s leg[%d] side=%q not in {%q, %q}",
 			accountID, posLabel, j, leg.Side, engine.Long, engine.Short)
 	}
 
 	if !isRecognizedKind(leg.Kind) {
-		return fmt.Errorf("invalid account %q: %s leg[%d]: kind %q not in %v",
+		return fmt.Errorf("invalid account: id=%q %s leg[%d] kind=%q not in %v",
 			accountID, posLabel, j, leg.Kind, recognizedKinds)
 	}
 
 	switch leg.Kind {
 	case engine.OptionKind:
-		if leg.P < 0 {
-			return fmt.Errorf("invalid account %q: %s leg[%d]: option P=%g must be >= 0",
+		if !isFinite(leg.P) {
+			return fmt.Errorf("invalid account: id=%q %s leg[%d] option P=%g is not finite",
 				accountID, posLabel, j, leg.P)
 		}
+		if leg.P < 0 {
+			return fmt.Errorf("invalid account: id=%q %s leg[%d] option P=%g must be >= 0",
+				accountID, posLabel, j, leg.P)
+		}
+		if !isFinite(leg.Qty) {
+			return fmt.Errorf("invalid account: id=%q %s leg[%d] option qty=%g is not finite",
+				accountID, posLabel, j, leg.Qty)
+		}
 		if leg.Qty <= 0 {
-			return fmt.Errorf("invalid account %q: %s leg[%d]: option qty=%g must be > 0",
+			return fmt.Errorf("invalid account: id=%q %s leg[%d] option qty=%g must be > 0",
 				accountID, posLabel, j, leg.Qty)
 		}
 	case engine.StockKind:
-		if leg.Shares <= 0 {
-			return fmt.Errorf("invalid account %q: %s leg[%d]: stock shares=%g must be > 0",
+		if !isFinite(leg.Shares) {
+			return fmt.Errorf("invalid account: id=%q %s leg[%d] stock shares=%g is not finite",
 				accountID, posLabel, j, leg.Shares)
 		}
+		if leg.Shares <= 0 {
+			return fmt.Errorf("invalid account: id=%q %s leg[%d] stock shares=%g must be > 0",
+				accountID, posLabel, j, leg.Shares)
+		}
+		if !isFinite(pos.U) {
+			return fmt.Errorf("invalid account: id=%q %s leg[%d] stock position U=%g is not finite",
+				accountID, posLabel, j, pos.U)
+		}
 		if pos.U <= 0 {
-			return fmt.Errorf("invalid account %q: %s leg[%d]: stock position U=%g must be > 0",
+			return fmt.Errorf("invalid account: id=%q %s leg[%d] stock position U=%g must be > 0",
 				accountID, posLabel, j, pos.U)
 		}
 	case engine.ETFKind, engine.ETNKind, engine.ConvertibleKind, engine.WarrantKind:
-		if leg.Price <= 0 {
-			return fmt.Errorf("invalid account %q: %s leg[%d]: %s price=%g must be > 0",
+		if !isFinite(leg.Price) {
+			return fmt.Errorf("invalid account: id=%q %s leg[%d] %s price=%g is not finite",
 				accountID, posLabel, j, leg.Kind, leg.Price)
 		}
+		if leg.Price <= 0 {
+			return fmt.Errorf("invalid account: id=%q %s leg[%d] %s price=%g must be > 0",
+				accountID, posLabel, j, leg.Kind, leg.Price)
+		}
+		if !isFinite(leg.Shares) {
+			return fmt.Errorf("invalid account: id=%q %s leg[%d] %s shares=%g is not finite",
+				accountID, posLabel, j, leg.Kind, leg.Shares)
+		}
 		if leg.Shares <= 0 {
-			return fmt.Errorf("invalid account %q: %s leg[%d]: %s shares=%g must be > 0",
+			return fmt.Errorf("invalid account: id=%q %s leg[%d] %s shares=%g must be > 0",
 				accountID, posLabel, j, leg.Kind, leg.Shares)
 		}
 	}
 
 	return nil
+}
+
+func isFinite(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0)
 }
 
 func isRecognizedKind(k engine.Kind) bool {
