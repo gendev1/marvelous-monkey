@@ -25,8 +25,19 @@ Programmable margin calculator. A CEL-based rule engine (`internal/engine/`) eva
 
 ## Adding a rule
 
-1. Add the entry to `rules/cboe_baseline.yaml` (or `rules/house_rules.yaml`) **above** `generic_limited_risk_combo`. Declare slots in `match.legs` and predicates in `match.constraints`.
-2. Add a test in `internal/engine/rulebook_test.go` against a known-good number — Cboe manual page, FINRA Rule 4210 example, or broker output. Assert all three of `Requirement`, `AppliedProceeds`, `CashCall` where the source provides them. Names follow `Test<Strategy>_p<page>` so the manual page stays greppable.
+Every rule has a `requires:` block where pre-formula preconditions live. There is no Go switch for per-rule input validation — `validateRequirements` (in `internal/engine/rulebook.go`) is the sole interpreter, so a missing primitive means no guard runs.
+
+1. Add the entry to `rules/cboe_baseline.yaml` (or `rules/house_rules.yaml`) **above** `generic_limited_risk_combo`. Declare slots in `match.legs`, expression-shaped predicates in `match.constraints`, and pre-formula field/coverage checks in `requires`.
+2. Supported `requires` primitives:
+   - `required_fields` — named slot must have the listed fields populated.
+   - `positive_fields` — named slot's listed fields must be `> 0`.
+   - `expiration_slots` — listed slots must share an expiration.
+   - `same_across_slots` — a given field must be equal across the listed slots.
+   - `same_contract_size` — listed slots must share `contract_size`.
+   - `min_fields` — slot must have at least N of the listed fields populated.
+   - `all_slots` — bulk checks across every leg; only valid with `legs_pattern: all_options`.
+3. Add a test in `internal/engine/rulebook_test.go` against a known-good number — Cboe manual page, FINRA Rule 4210 example, or broker output. Assert all three of `Requirement`, `AppliedProceeds`, `CashCall` where the source provides them. Names follow `Test<Strategy>_p<page>` so the manual page stays greppable.
+4. Add at least one negative test whose only guard is the new YAML `requires` entry — strip the entry locally and confirm the test would otherwise pass, so the guard is what's being exercised.
 
 ## Tests and Validation
 

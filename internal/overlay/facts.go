@@ -118,18 +118,27 @@ func sideToken(f positionFacts) string {
 	}
 }
 
-// groupFacts is the per-group fact namespace exposed to CEL rules under
-// `group.*`. Built from the stock-like positions sharing a group key
-// (the `group_by` field on a group-scope rule, either "underlying" or
-// "symbol"). Group-scope evaluation lands incrementally; this issue
-// uses it only for block-mode rules.
+// groupFacts holds the aggregates exposed under `group.*` for
+// group-scope CEL evaluation. positions tracks the member position IDs
+// and Layer-1 baseline requirements so max/floor modes can compose the
+// D2 baseline sum and emit per-member baselines into Evidence for
+// round-trip auditability.
 type groupFacts struct {
 	key           string
-	longMV        float64
-	shortMV       float64
 	grossMV       float64
 	netMV         float64
+	longMV        float64
+	shortMV       float64
 	positionCount int
+	baselineSum   float64
+	positions     []groupMember
+}
+
+// groupMember is one row of a group's membership list: enough to
+// reconstruct the audit trail without copying full positionFacts.
+type groupMember struct {
+	id          string
+	baselineReq float64
 }
 
 // activation builds the `group` namespace for CEL evaluation.
@@ -140,55 +149,20 @@ func (g groupFacts) activation() map[string]any {
 		"short_market_value": g.shortMV,
 		"gross_market_value": g.grossMV,
 		"net_market_value":   g.netMV,
-		"position_count":     int64(g.positionCount),
+		"position_count":     float64(g.positionCount),
 	}
 }
 
-// stockLikePos pairs a position ID with its derived facts so the
-// group-scope pass can reuse the work done by the position-scope pass.
-type stockLikePos struct {
-	positionID string
-	facts      positionFacts
-}
-
-// groupFactsByRule partitions the stock-like positions into groups
-// keyed by the rule's GroupBy attribute and returns the per-group
-// aggregates in deterministic key order. A position with no key for the
-// chosen attribute (empty underlying/symbol) is skipped — a group with
-// no identity cannot be referenced by a rule's audit trail.
-func groupFactsByRule(rule overlayRule, positions []stockLikePos) []groupFacts {
-	bucket := map[string]*groupFacts{}
-	var order []string
-	for _, sp := range positions {
-		var key string
-		switch rule.GroupBy {
-		case "underlying":
-			key = sp.facts.primarySymbol
-		case "symbol":
-			key = sp.facts.primarySymbol
-		default:
-			continue
-		}
-		if key == "" {
-			continue
-		}
-		gf, ok := bucket[key]
-		if !ok {
-			gf = &groupFacts{key: key}
-			bucket[key] = gf
-			order = append(order, key)
-		}
-		gf.longMV += sp.facts.longMV
-		gf.shortMV += sp.facts.shortMV
-		gf.grossMV += sp.facts.grossMV
-		gf.netMV += sp.facts.netMV
-		gf.positionCount++
+// groupKeyFor returns the key under which a position should bucket for
+// a rule's group_by. underlying and symbol coincide for stocks today
+// (the leg's Underlying is the symbol); they are documented as separate
+// for forward compatibility with options keying by option symbol.
+func groupKeyFor(groupBy string, facts positionFacts) string {
+	switch groupBy {
+	case "underlying", "symbol":
+		return facts.primarySymbol
 	}
-	out := make([]groupFacts, 0, len(order))
-	for _, k := range order {
-		out = append(out, *bucket[k])
-	}
-	return out
+	return ""
 }
 
 // factsActivation builds the `position` namespace for CEL evaluation.
