@@ -9,7 +9,6 @@
 #   - Creates branch from origin/<default-branch> (falls back to main).
 #   - If the branch already exists, attaches the worktree to it (resumable).
 #   - Copies .claude/ into the worktree so skills/agents travel with it.
-#   - Runs `npm install` if package.json is present.
 #
 # Output (stdout):
 #   First line: CREATED or EXISTS or REUSED-BRANCH
@@ -74,14 +73,6 @@ fi
 # Copy .claude/ so skills, agents, and settings travel with the worktree.
 if [[ -d "${REPO_ROOT}/.claude" ]]; then
   cp -R "${REPO_ROOT}/.claude" "${WORKTREE_PATH}/"
-fi
-
-# Install dependencies if a JS project.
-if [[ -f "${WORKTREE_PATH}/package.json" ]]; then
-  (cd "${WORKTREE_PATH}" && npm install --silent --no-audit --no-fund) || {
-    echo "npm install failed in ${WORKTREE_PATH}." >&2
-    exit 1
-  }
 fi
 
 echo "${STATUS}"

@@ -7,11 +7,13 @@ description: Promote a fully-planned epic from local markdown to GitHub Issues. 
 
 You promote one epic's planning markdown to GitHub Issues, then delete the local files. The skill is the bridge between the planning workflow (local markdown) and the implementation workflow (GitHub Issues are the source of truth; implementation sessions read them).
 
+The epic is a coordination container, not an implementation unit. Graduation creates one umbrella tracker issue plus many child issues. The umbrella issue is never implemented directly; each child issue should be small enough to become one readable PR.
+
 This skill **mutates external state** — it creates GitHub Issues that can't be cleanly undone. Run preflight checks, two-pass for cross-refs, and never delete local files until every GitHub creation has succeeded.
 
 ## When to use
 
-- User asks to graduate / promote / publish an epic ("graduate `scaffold-auth-and-db` to github").
+- User asks to graduate / promote / publish an epic ("graduate `account-aggregator` to github").
 - User says planning is done for an epic and wants to move on to implementation.
 - User explicitly says "push the epic to github" or "create issues from this epic".
 
@@ -37,11 +39,11 @@ Run these checks before touching GitHub. Any failure → print the specific fix 
 
 | Local artifact | GitHub artifact |
 | --- | --- |
-| `<issue-slug>.md` | One GitHub Issue. Title = issue file's H1. Body = issue file content minus the H1. Labeled `epic:<slug>`. |
-| `epic.md` | One **umbrella** GitHub Issue. Title = epic title. Body = epic.md content with the Issues section rewritten to a checklist of `#N` child refs. Labeled `epic:<slug>` and `umbrella`. Pinned (`gh issue pin`). |
+| `<issue-slug>.md` | One PR-sized GitHub child Issue. Title = issue file's H1. Body = issue file content minus the H1. Labeled `epic:<slug>`. |
+| `epic.md` | One **umbrella** tracker Issue. Title = epic title. Body = epic.md content with the Issues section rewritten to a checklist of `#N` child refs. Labeled `epic:<slug>` and `umbrella`. Pinned (`gh issue pin`). Do not implement this issue directly. |
 | `research.md` | Not graduated. Internal scratch; gets deleted with the rest. |
 | Tasks inside issue files | Stay inline as part of the issue body (checklist or sub-list — preserved as-written from the issue file). They are not separate GitHub Issues. |
-| Cross-issue refs in issue bodies (`[wire-drizzle](wire-drizzle.md)`) | Rewritten to `#N` after pass 1 captures issue numbers. |
+| Cross-issue refs in issue bodies (`[market-value-buckets](market-value-buckets.md)`) | Rewritten to `#N` after pass 1 captures issue numbers. |
 
 **Labels (auto-create idempotently):**
 
@@ -71,8 +73,8 @@ If a `.graduated.json` already lists an entry, skip the creation (idempotent ret
 2. Find the `## Issues` (or numbered `## 7. Issues`) section. Replace its bullet list with a checklist where each item references the child by `#N`:
 
    ```
-   - [ ] #42 — **[1] Declare runtime deps + create `.env.example`** — declare drizzle-orm, postgres ...
-   - [ ] #43 — **[2] Wire Drizzle config and DB client** — drizzle.config.ts + app/db/client.ts
+   - [ ] #42 — **[1] Define account snapshot types** — account, position, and balance input structs
+   - [ ] #43 — **[2] Implement market value buckets** — LMV, SMV, equity, and adjusted balance calculations
    ```
 
    Preserve complexity, heading, context line, and the `‖` parallelization marker if present.
@@ -80,7 +82,7 @@ If a `.graduated.json` already lists an entry, skip the creation (idempotent ret
 4. `gh issue pin <number>` to pin it.
 5. Append the umbrella entry to `.graduated.json`.
 
-**Pass 3 — rewrite cross-refs.** For each child issue whose body contained markdown links to sibling issue files (`(wire-drizzle.md)`, `[some-issue](some-issue.md)`, `Depends on: define-users-schema.md`) or bare sibling slugs in the **`## Dependencies`** section:
+**Pass 3 — rewrite cross-refs.** For each child issue whose body contained markdown links to sibling issue files (`(market-value-buckets.md)`, `[some-issue](some-issue.md)`, `Depends on: define-account-types.md`) or bare sibling slugs in the **`## Dependencies`** section:
 
 1. Build a `slug → #N` map from `.graduated.json`.
 2. Rewrite each link: `[anything](some-slug.md)` → `#N`, and bare `some-slug.md` mentions → `#N`. The text-side of the link can be dropped; GitHub auto-renders `#N` with the issue's title.
@@ -95,9 +97,9 @@ After all three passes succeed, print a summary:
 ✓ Created umbrella issue: <URL>  (#54)
 ✓ Created 12 child issues: #42–#53
 ✓ Cross-refs resolved in 4 issues
-✓ Labels: epic:scaffold-auth-and-db, umbrella
+✓ Labels: epic:account-aggregator, umbrella
 
-Local files at docs/epics/scaffold-auth-and-db/ are now redundant with GitHub.
+Local files at docs/epics/account-aggregator/ are now redundant with GitHub.
 Delete them? [y/N]
 ```
 
