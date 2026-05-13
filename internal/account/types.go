@@ -47,8 +47,11 @@ type PositionEvaluation struct {
 // AccountSnapshot is the aggregator's deterministic output. SMV fields carry
 // positive magnitudes per the resolved sign convention.
 type AccountSnapshot struct {
-	AccountID string
-	AsOf      time.Time
+	AccountID   string
+	AccountType engine.AccountType
+	Phase       engine.Phase
+	AsOf        time.Time
+	Currency    string
 
 	LMVStock  float64
 	LMVOption float64
@@ -75,4 +78,9 @@ type AccountSnapshot struct {
 	Evaluations []PositionEvaluation
 	Violations  []PositionEvaluation
 	Errors      []PositionEvaluation
+
+	// Warnings holds account-level non-error notes (e.g. the zero-equity
+	// guard message). Distinct from Errors so consumers don't confuse a
+	// degenerate but valid snapshot with a per-position evaluation failure.
+	Warnings []string
 }
