@@ -622,6 +622,9 @@ func TestShortCallLongWarrant_marketCap_p14(t *testing.T) {
 // ETF tracks the index, KEquivalent on the ETF leg = $460.
 // Margin initial:     50% * 450 * 100             = $22,500.00
 // Margin maintenance: 25% * min(450, 460) * 100   = $11,250.00
+// Proceeds (initial = maintenance, since P0 == P): 10 * 1 * 100 = $1,000.00
+// CashCall initial = 22,500 - 1,000 = $21,500.00
+// CashCall maintenance = 11,250 - 1,000 = $10,250.00
 func TestShortIndexCallLongETF_margin_p14(t *testing.T) {
 	rb := loadRB(t)
 	pos := Position{
@@ -640,10 +643,14 @@ func TestShortIndexCallLongETF_margin_p14(t *testing.T) {
 	if res.RuleID != "short_index_call_long_etf" {
 		t.Errorf("matched %s, want short_index_call_long_etf", res.RuleID)
 	}
-	assertClose(t, "p14 SIC+LETF margin initial", res.Requirement, 22500.00)
+	assertClose(t, "p14 SIC+LETF margin initial (req)", res.Requirement, 22500.00)
+	assertClose(t, "p14 SIC+LETF margin initial (proceeds)", res.AppliedProceeds, 1000.00)
+	assertClose(t, "p14 SIC+LETF margin initial (cash call)", res.CashCall, 21500.00)
 
 	res = mustEvaluate(t, rb, pos, MarginAccount, Maintenance)
-	assertClose(t, "p14 SIC+LETF margin maintenance", res.Requirement, 11250.00)
+	assertClose(t, "p14 SIC+LETF margin maintenance (req)", res.Requirement, 11250.00)
+	assertClose(t, "p14 SIC+LETF margin maintenance (proceeds)", res.AppliedProceeds, 1000.00)
+	assertClose(t, "p14 SIC+LETF margin maintenance (cash call)", res.CashCall, 10250.00)
 }
 
 // Maintenance value cap: when ETF market value exceeds the strike-equivalent,
@@ -664,5 +671,8 @@ func TestShortIndexCallLongETF_maintenanceCap_p14(t *testing.T) {
 		},
 	}
 	res := mustEvaluate(t, rb, pos, MarginAccount, Maintenance)
-	assertClose(t, "p14 SIC+LETF maintenance cap binds", res.Requirement, 11500.00)
+	assertClose(t, "p14 SIC+LETF maintenance cap binds (req)", res.Requirement, 11500.00)
+	// Proceeds = sc.P * qty * mult = 15 * 1 * 100 = $1,500.00
+	assertClose(t, "p14 SIC+LETF maintenance cap binds (proceeds)", res.AppliedProceeds, 1500.00)
+	assertClose(t, "p14 SIC+LETF maintenance cap binds (cash call)", res.CashCall, 10000.00)
 }
