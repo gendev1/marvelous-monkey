@@ -653,51 +653,6 @@ func hasAnyOutput(r Rule) bool {
 	return false
 }
 
-// validateRuleInputs checks fields that only become required once a specific
-// rule shape has bound. Universal validation cannot require these globally:
-// e.g. a naked short option doesn't need expiration, but a vertical spread
-// does because the rule compares expirations and would otherwise accept
-// "" <= "". These errors are validation failures, not no-match outcomes.
-//
-// Design choice: the rule-shape helpers used here (requireSameStringField,
-// requireExpirationSlots) remain in Go rather than migrating to CEL
-// match.constraints. The CEL-typing epic audit walked all checks reachable
-// from this function and classified them as still needed: none are made
-// redundant by a typed Leg. The structural reason they stay Go-side is
-// blank-string equality — requireSameStringField rejects two legs whose
-// underlying / expiration / venue fields are both "". In CEL,
-// legs.a.underlying == legs.b.underlying is true for two blank strings, so a
-// constraint phrased that way silently passes on under-specified input. The
-// Go check treats blank as a distinct "missing" state, which CEL's
-// value-equality model cannot express without a parallel "is-set" channel.
-//
-// Cross-leg uniqueness on all_options patterns (where the bound set has
-// unbounded size and named-slot CEL cannot iterate it) is handled separately
-// by validateRequirements via the YAML `requires.all_slots` block.
-//
-// requireExpirationSlots stays Go-side for a related but narrower reason: it
-// validates that expiration fields are present and parseable dates before CEL
-// constraints compare them as strings. CEL can compare strings, but it does
-// not know that "" or "not-a-date" are invalid expirations.
-//
-// The four "new failing" cases surfaced by the audit (vertical blank
-// underlying / blank expiration / blank venue, generic mixed underlyings) are
-// already covered by TestRuleInputValidation_* — see the epic's Out-of-scope
-// note for the rejected migration to CEL constraints.
-func validateRuleInputs(ruleID string, bound map[string]Leg) error {
-	switch ruleID {
-	default:
-		return nil
-	}
-}
-
-func requireNonEmpty(ruleID, slot, field, value string) error {
-	if value == "" {
-		return fmt.Errorf("invalid position: rule %s requires legs.%s.%s", ruleID, slot, field)
-	}
-	return nil
-}
-
 func requirePositive(ruleID, slot, field string, value float64) error {
 	if !isFinite(value) || value <= 0 {
 		return fmt.Errorf("invalid position: rule %s requires legs.%s.%s > 0, got %g", ruleID, slot, field, value)
@@ -734,10 +689,6 @@ func requireExpirationSlots(ruleID string, bound map[string]Leg, slots ...string
 		}
 	}
 	return nil
-}
-
-func requireSameUnderlying(ruleID string, bound map[string]Leg, slots ...string) error {
-	return requireSameStringField(ruleID, bound, "underlying", slots...)
 }
 
 func requireSameStringField(ruleID string, bound map[string]Leg, field string, slots ...string) error {
@@ -830,11 +781,12 @@ func fieldIsPresent(l Leg, field string) (bool, error) {
 	return false, fmt.Errorf("invalid position: unknown leg field %q", field)
 }
 
-// validateRequirements is the runtime interpreter for RequireSpec. It runs
-// before validateRuleInputs in evaluateOne and produces the same
-// "invalid position:" error prefix so callers cannot distinguish the two
-// validation paths by error shape. Read-only on bound and activation —
-// Rulebook is concurrent-safe and the interpreter must not mutate either.
+// validateRequirements is the runtime interpreter for RequireSpec — the sole
+// rule-shape validator after the YAML-`requires` migration retired the
+// rule-ID-keyed Go switch. Errors use the "invalid position:" prefix so
+// callers cannot distinguish requirement failures from universal position
+// validation by error shape. Read-only on bound and activation — Rulebook is
+// concurrent-safe and the interpreter must not mutate either.
 func (rb *Rulebook) validateRequirements(ruleID string, spec RequireSpec, bound map[string]Leg, activation map[string]any) error {
 	checkSlotBound := func(slot string) error {
 		if _, ok := bound[slot]; !ok {
@@ -1031,9 +983,6 @@ func (rb *Rulebook) evaluateOne(pos Position, rule Rule, accountType AccountType
 		}
 	}
 	if err := rb.validateRequirements(rule.ID, rule.Requires, bound, activation); err != nil {
-		return Result{}, false, err
-	}
-	if err := validateRuleInputs(rule.ID, bound); err != nil {
 		return Result{}, false, err
 	}
 

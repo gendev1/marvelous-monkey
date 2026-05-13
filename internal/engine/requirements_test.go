@@ -371,7 +371,7 @@ func TestRequires_DualPathSamePass(t *testing.T) {
 	res1 := mustEvaluate(t, rb, pos1, MarginAccount, Initial)
 	assertClose(t, "p28 short put OTM via requires path", res1.Requirement, 1000.00)
 
-	// Covered call (p.47) — multi-slot rule path with validateRuleInputs.
+	// Covered call (p.47) — multi-slot rule path with same-underlying + min-fields requirements.
 	pos2 := Position{
 		U: 92.38, Class: "equity",
 		Legs: []Leg{

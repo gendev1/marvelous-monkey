@@ -221,7 +221,7 @@ func TestValidate_warrantMissingKEquivalent(t *testing.T) {
 // the short index call (`sc`). The maintenance formula reads
 // `min(le.price, le.K_equivalent)` — a zero KEquivalent on the ETF leg would
 // collapse that minimum to 0 and produce a confidently-wrong $0 requirement,
-// which is the failure mode validateRuleInputs exists to catch.
+// which is the failure mode RequireSpec validation exists to catch.
 func TestRuleInputValidation_shortIndexCallLongETFMissingKEquivalent(t *testing.T) {
 	rb := loadRB(t)
 	pos := Position{
