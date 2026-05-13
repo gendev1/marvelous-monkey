@@ -324,6 +324,18 @@ rules:
         - "legs.bc.expiration == legs.bp.expiration"
         - "legs.bp.expiration == legs.sp.expiration"
         - "legs.sp.expiration == legs.sc.expiration"
+    requires:
+      required_fields:
+        bc: [underlying, style]
+        bp: [underlying, style]
+        sp: [underlying, style]
+        sc: [underlying, style]
+      same_across_slots:
+        - { field: underlying, slots: [bc, bp, sp, sc] }
+        - { field: style,      slots: [bc, bp, sp, sc] }
+      same_contract_size:
+        - [bc, bp, sp, sc]
+      expiration_slots: [bc, bp, sp, sc]
     formulas:
       # No cash block. American boxes COULD be cash-secured (net debit on
       # deposit) but European boxes rely on the loan-value mechanism which
@@ -372,6 +384,18 @@ rules:
         - "legs.bc.expiration == legs.bp.expiration"
         - "legs.bp.expiration == legs.sp.expiration"
         - "legs.sp.expiration == legs.sc.expiration"
+    requires:
+      required_fields:
+        bc: [underlying, style]
+        bp: [underlying, style]
+        sp: [underlying, style]
+        sc: [underlying, style]
+      same_across_slots:
+        - { field: underlying, slots: [bc, bp, sp, sc] }
+        - { field: style,      slots: [bc, bp, sp, sc] }
+      same_contract_size:
+        - [bc, bp, sp, sc]
+      expiration_slots: [bc, bp, sp, sc]
     formulas:
       cash:
         # Cash-secured short box: max loss on deposit. Mirrors the margin
@@ -527,6 +551,11 @@ rules:
         - "legs.lp.expiration == legs.sc.expiration"
         - "legs.lp.style == 'american'"
         - "legs.sc.style == 'american'"
+    requires:
+      same_across_slots:
+        - { field: underlying, slots: [lp, sc] }
+        - { field: style,      slots: [lp, sc] }
+      expiration_slots: [lp, sc]
     formulas:
       cash:
         initial:     "U * legs.ls.shares + legs.lp.P0 * legs.lp.qty * legs.lp.mult"
@@ -549,6 +578,13 @@ rules:
         - "legs.lc.expiration == legs.sp.expiration"
         - "legs.lc.style == 'american'"
         - "legs.sp.style == 'american'"
+    requires:
+      same_across_slots:
+        - { field: underlying, slots: [lc, sp] }
+        - { field: style,      slots: [lc, sp] }
+      expiration_slots: [lc, sp]
+      positive_fields:
+        ss: [short_sale_proceeds, sale_price]
     formulas:
       cash:
         permitted: false
@@ -577,6 +613,11 @@ rules:
         - "legs.lp.K < legs.sc.K"
         - "legs.lp.style == 'american'"
         - "legs.sc.style == 'american'"
+    requires:
+      same_across_slots:
+        - { field: underlying, slots: [lp, sc] }
+        - { field: style,      slots: [lp, sc] }
+      expiration_slots: [lp, sc]
     formulas:
       cash:
         initial:     "U * legs.ls.shares + legs.lp.P0 * legs.lp.qty * legs.lp.mult"

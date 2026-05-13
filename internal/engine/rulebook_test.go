@@ -859,3 +859,115 @@ func TestRequires_ShortIndexCallLongETF_BlankTracksIndexRejected(t *testing.T) {
 		t.Fatalf("got %q, want 'no rule matched' for blank tracks_index (CEL constraint demotes)", err.Error())
 	}
 }
+
+// -----------------------------------------------------------------------------
+// Negative tests for the five multi-leg rules migrated to YAML `requires:` in
+// issue #36. Each asserts the "invalid position:" prefix plus the offending
+// slot/field/group so a future regression that drops the requires block (or
+// weakens an interpreter primitive) surfaces as a precise diff.
+
+func longBoxValid() Position {
+	return Position{
+		U: 100, Class: "equity",
+		Legs: []Leg{
+			{Side: Long, Kind: OptionKind, OptionType: "call",
+				K: 95, P: 8, P0: 8, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-12-20", Underlying: "XYZ"},
+			{Side: Short, Kind: OptionKind, OptionType: "put",
+				K: 95, P: 1, P0: 1, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-12-20", Underlying: "XYZ"},
+			{Side: Long, Kind: OptionKind, OptionType: "put",
+				K: 105, P: 4, P0: 4, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-12-20", Underlying: "XYZ"},
+			{Side: Short, Kind: OptionKind, OptionType: "call",
+				K: 105, P: 2, P0: 2, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-12-20", Underlying: "XYZ"},
+		},
+	}
+}
+
+func TestRequires_LongBox_MismatchedQtyMultRejected(t *testing.T) {
+	rb := loadRB(t)
+	pos := longBoxValid()
+	pos.Legs[3].Qty = 2 // sc.qty*mult diverges from bc/bp/sp
+	_, err := rb.Evaluate(pos, MarginAccount, Initial)
+	assertInvalidPositionErr(t, err, "long_box_spread", "qty*mult", "[bc bp sp sc]")
+}
+
+func TestRequires_LongBox_MissingUnderlyingRejected(t *testing.T) {
+	rb := loadRB(t)
+	pos := longBoxValid()
+	for i := range pos.Legs {
+		pos.Legs[i].Underlying = ""
+	}
+	_, err := rb.Evaluate(pos, MarginAccount, Initial)
+	assertInvalidPositionErr(t, err, "long_box_spread", "underlying")
+}
+
+func shortBoxValid() Position {
+	return Position{
+		U: 100, Class: "equity",
+		Legs: []Leg{
+			{Side: Long, Kind: OptionKind, OptionType: "call",
+				K: 105, P: 1, P0: 1, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-12-20", Underlying: "XYZ"},
+			{Side: Short, Kind: OptionKind, OptionType: "put",
+				K: 105, P: 4, P0: 4, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-12-20", Underlying: "XYZ"},
+			{Side: Long, Kind: OptionKind, OptionType: "put",
+				K: 95, P: 1, P0: 1, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-12-20", Underlying: "XYZ"},
+			{Side: Short, Kind: OptionKind, OptionType: "call",
+				K: 95, P: 8, P0: 8, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-12-20", Underlying: "XYZ"},
+		},
+	}
+}
+
+func TestRequires_ShortBox_MismatchedStyleRejected(t *testing.T) {
+	rb := loadRB(t)
+	pos := shortBoxValid()
+	pos.Legs[3].Style = "european"
+	_, err := rb.Evaluate(pos, MarginAccount, Initial)
+	assertInvalidPositionErr(t, err, "short_box_spread", "style")
+}
+
+func TestRequires_Conversion_BlankExpirationRejected(t *testing.T) {
+	rb := loadRB(t)
+	pos := Position{
+		U: 115, Class: "equity",
+		Legs: []Leg{
+			{Side: Long, Kind: OptionKind, OptionType: "put",
+				K: 110, P: 1.35, P0: 1.35, Qty: 1, Mult: 100, Style: "american", Expiration: "", Underlying: "XYZ"},
+			{Side: Short, Kind: OptionKind, OptionType: "call",
+				K: 110, P: 6.50, P0: 6.50, Qty: 1, Mult: 100, Style: "american", Expiration: "", Underlying: "XYZ"},
+			{Side: Long, Kind: StockKind, Shares: 100},
+		},
+	}
+	_, err := rb.Evaluate(pos, MarginAccount, Initial)
+	assertInvalidPositionErr(t, err, "conversion", "expiration")
+}
+
+func TestRequires_ReverseConversion_NonPositiveSalePriceRejected(t *testing.T) {
+	rb := loadRB(t)
+	pos := Position{
+		U: 115, Class: "equity",
+		Legs: []Leg{
+			{Side: Long, Kind: OptionKind, OptionType: "call",
+				K: 110, P: 6.50, P0: 6.50, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-05-17", Underlying: "XYZ"},
+			{Side: Short, Kind: OptionKind, OptionType: "put",
+				K: 110, P: 1.35, P0: 1.35, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-05-17", Underlying: "XYZ"},
+			{Side: Short, Kind: StockKind, Shares: 100, ShortSaleProceeds: 11500, SalePrice: 0},
+		},
+	}
+	_, err := rb.Evaluate(pos, MarginAccount, Initial)
+	assertInvalidPositionErr(t, err, "reverse_conversion", "legs.ss.sale_price")
+}
+
+func TestRequires_Collar_MismatchedUnderlyingRejected(t *testing.T) {
+	rb := loadRB(t)
+	pos := Position{
+		U: 31.75, Class: "equity",
+		Legs: []Leg{
+			{Side: Long, Kind: OptionKind, OptionType: "put",
+				K: 30, P: 0.40, P0: 0.40, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-12-20", Underlying: "XYZ"},
+			{Side: Short, Kind: OptionKind, OptionType: "call",
+				K: 35, P: 0.20, P0: 0.20, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-12-20", Underlying: "ABC"},
+			{Side: Long, Kind: StockKind, Shares: 100},
+		},
+	}
+	_, err := rb.Evaluate(pos, MarginAccount, Initial)
+	assertInvalidPositionErr(t, err, "collar", "underlying")
+}
