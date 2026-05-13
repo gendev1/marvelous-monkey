@@ -265,3 +265,147 @@ func TestValidate_rejectsUnknownSide(t *testing.T) {
 	a.Positions[0].Position.Legs[0].Side = engine.Side("neutral")
 	assertInvalidAccount(t, validate(a))
 }
+
+func optionLeg(side engine.Side, p, qty, mult float64) engine.Leg {
+	return engine.Leg{
+		Side:       side,
+		Kind:       engine.OptionKind,
+		OptionType: "call",
+		P:          p,
+		Qty:        qty,
+		Mult:       mult,
+		K:          100,
+	}
+}
+
+func TestLegMarketValue_longCallOption(t *testing.T) {
+	got := legMarketValue(optionLeg(engine.Long, 5, 2, 100), 0)
+	if got != 1000 {
+		t.Fatalf("want 1000, got %v", got)
+	}
+}
+
+func TestLegMarketValue_shortPutOption(t *testing.T) {
+	got := legMarketValue(optionLeg(engine.Short, 5, 2, 100), 0)
+	if got != 1000 {
+		t.Fatalf("short leg MV should be positive magnitude; want 1000, got %v", got)
+	}
+}
+
+func TestLegMarketValue_defaultOptionMultiplier(t *testing.T) {
+	got := legMarketValue(optionLeg(engine.Long, 2, 1, 0), 0)
+	if got != 200 {
+		t.Fatalf("Mult==0 must default to 100; want 200, got %v", got)
+	}
+}
+
+func TestLegMarketValue_explicitNonStandardMult(t *testing.T) {
+	got := legMarketValue(optionLeg(engine.Long, 2, 1, 10), 0)
+	if got != 20 {
+		t.Fatalf("want 20 (mini-option Mult=10 honored), got %v", got)
+	}
+}
+
+func TestLegMarketValue_longStock(t *testing.T) {
+	leg := engine.Leg{Side: engine.Long, Kind: engine.StockKind, Shares: 100}
+	got := legMarketValue(leg, 150)
+	if got != 15000 {
+		t.Fatalf("want 15000, got %v", got)
+	}
+}
+
+func TestLegMarketValue_stockLikeBuckets(t *testing.T) {
+	kinds := []engine.Kind{engine.ETFKind, engine.ETNKind, engine.ConvertibleKind, engine.WarrantKind}
+	for _, k := range kinds {
+		t.Run(string(k), func(t *testing.T) {
+			leg := engine.Leg{Side: engine.Long, Kind: k, Price: 50, Shares: 10}
+			got := legMarketValue(leg, 0)
+			if got != 500 {
+				t.Fatalf("want 500, got %v", got)
+			}
+		})
+	}
+}
+
+func TestAccumulate_longStockBucket(t *testing.T) {
+	var s AccountSnapshot
+	leg := engine.Leg{Side: engine.Long, Kind: engine.StockKind, Shares: 100}
+	accumulate(&s, leg, 150)
+	if s.LMVStock != 15000 {
+		t.Fatalf("LMVStock want 15000, got %v", s.LMVStock)
+	}
+	if s.LMVOption != 0 || s.SMVStock != 0 || s.SMVOption != 0 {
+		t.Fatalf("other buckets should be zero: %+v", s)
+	}
+}
+
+func TestAccumulate_shortStockBucket(t *testing.T) {
+	var s AccountSnapshot
+	leg := engine.Leg{Side: engine.Short, Kind: engine.StockKind, Shares: 100}
+	accumulate(&s, leg, 150)
+	if s.SMVStock != 15000 {
+		t.Fatalf("SMVStock want 15000 (positive magnitude), got %v", s.SMVStock)
+	}
+	if s.LMVStock != 0 || s.LMVOption != 0 || s.SMVOption != 0 {
+		t.Fatalf("other buckets should be zero: %+v", s)
+	}
+}
+
+func TestAccumulate_longShortOptionBuckets(t *testing.T) {
+	var s AccountSnapshot
+	accumulate(&s, optionLeg(engine.Long, 5, 2, 100), 0)
+	if s.LMVOption != 1000 {
+		t.Fatalf("LMVOption want 1000, got %v", s.LMVOption)
+	}
+	if s.SMVOption != 0 || s.LMVStock != 0 || s.SMVStock != 0 {
+		t.Fatalf("long-call should not contaminate other buckets: %+v", s)
+	}
+
+	var s2 AccountSnapshot
+	put := optionLeg(engine.Short, 3, 4, 100)
+	put.OptionType = "put"
+	accumulate(&s2, put, 0)
+	if s2.SMVOption != 1200 {
+		t.Fatalf("SMVOption want 1200 positive, got %v", s2.SMVOption)
+	}
+	if s2.LMVOption != 0 || s2.LMVStock != 0 || s2.SMVStock != 0 {
+		t.Fatalf("short-put should not contaminate other buckets: %+v", s2)
+	}
+}
+
+func TestAccumulate_stockLikeKindsRollIntoStockBuckets(t *testing.T) {
+	kinds := []engine.Kind{engine.ETFKind, engine.ETNKind, engine.ConvertibleKind, engine.WarrantKind}
+	for _, k := range kinds {
+		t.Run("long/"+string(k), func(t *testing.T) {
+			var s AccountSnapshot
+			accumulate(&s, engine.Leg{Side: engine.Long, Kind: k, Price: 50, Shares: 10}, 0)
+			if s.LMVStock != 500 {
+				t.Fatalf("LMVStock want 500, got %v", s.LMVStock)
+			}
+			if s.LMVOption != 0 || s.SMVStock != 0 || s.SMVOption != 0 {
+				t.Fatalf("stock-like long should only touch LMVStock: %+v", s)
+			}
+		})
+		t.Run("short/"+string(k), func(t *testing.T) {
+			var s AccountSnapshot
+			accumulate(&s, engine.Leg{Side: engine.Short, Kind: k, Price: 50, Shares: 10}, 0)
+			if s.SMVStock != 500 {
+				t.Fatalf("SMVStock want 500 positive, got %v", s.SMVStock)
+			}
+			if s.LMVOption != 0 || s.LMVStock != 0 || s.SMVOption != 0 {
+				t.Fatalf("stock-like short should only touch SMVStock: %+v", s)
+			}
+		})
+	}
+}
+
+func TestAccumulate_multipleLegsSum(t *testing.T) {
+	var s AccountSnapshot
+	leg1 := engine.Leg{Side: engine.Long, Kind: engine.StockKind, Shares: 100}
+	leg2 := engine.Leg{Side: engine.Long, Kind: engine.StockKind, Shares: 50}
+	accumulate(&s, leg1, 150)
+	accumulate(&s, leg2, 200)
+	if s.LMVStock != 15000+10000 {
+		t.Fatalf("LMVStock want 25000, got %v", s.LMVStock)
+	}
+}
