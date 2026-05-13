@@ -394,6 +394,33 @@ func hasAnyOutput(r Rule) bool {
 // e.g. a naked short option doesn't need expiration, but a vertical spread
 // does because the rule compares expirations and would otherwise accept
 // "" <= "". These errors are validation failures, not no-match outcomes.
+//
+// Design choice: the rule-shape helpers used here (requireSameStringField,
+// requireExpirationSlots, requireSingleUnderlying) remain in Go rather than
+// migrating to CEL match.constraints. The strict-typing audit walked all 28
+// checks reachable from this function (research-validation-audit.md §E.1–E.28)
+// and classified each as "still needed" — none are made redundant by the typed
+// Leg. Two structural reasons keep them Go-side:
+//
+//  1. Blank-string equality. requireSameStringField rejects two legs whose
+//     underlying / expiration / venue fields are both "". In CEL,
+//     legs.a.underlying == legs.b.underlying is true for two blank strings, so
+//     a constraint phrased that way silently passes on under-specified input.
+//     The Go check treats blank as a distinct "missing" state, which CEL's
+//     value-equality model cannot express without a parallel "is-set" channel.
+//
+//  2. Cross-leg uniqueness on all_options patterns. requireSingleUnderlying
+//     runs against generic_limited_risk_combo, whose legs_pattern: all_options
+//     binds an arbitrary number of legs. CEL constraints address slots by name
+//     (legs.a, legs.b, ...), so a constraint cannot iterate the bound set to
+//     assert "every leg shares one underlying". The same iteration-over-bound-set
+//     problem applies to requireExpirationSlots' near/far ordering checks under
+//     shape variants.
+//
+// The four "new failing" cases surfaced by the audit (vertical blank
+// underlying / blank expiration / blank venue, generic mixed underlyings) are
+// already covered by TestRuleInputValidation_* — see the epic's Out-of-scope
+// note for the rejected migration to CEL constraints.
 func validateRuleInputs(ruleID string, bound map[string]Leg) error {
 	switch ruleID {
 	case "long_option_short_dated", "long_option_long_dated_listed", "long_option_long_dated_otc":
