@@ -118,6 +118,53 @@ func sideToken(f positionFacts) string {
 	}
 }
 
+// groupFacts holds the aggregates exposed under `group.*` for
+// group-scope CEL evaluation. positions tracks the member position IDs
+// and Layer-1 baseline requirements so max/floor modes can compose the
+// D2 baseline sum and emit per-member baselines into Evidence for
+// round-trip auditability.
+type groupFacts struct {
+	key           string
+	grossMV       float64
+	netMV         float64
+	longMV        float64
+	shortMV       float64
+	positionCount int
+	baselineSum   float64
+	positions     []groupMember
+}
+
+// groupMember is one row of a group's membership list: enough to
+// reconstruct the audit trail without copying full positionFacts.
+type groupMember struct {
+	id          string
+	baselineReq float64
+}
+
+// activation builds the `group` namespace for CEL evaluation.
+func (g groupFacts) activation() map[string]any {
+	return map[string]any{
+		"key":                g.key,
+		"long_market_value":  g.longMV,
+		"short_market_value": g.shortMV,
+		"gross_market_value": g.grossMV,
+		"net_market_value":   g.netMV,
+		"position_count":     float64(g.positionCount),
+	}
+}
+
+// groupKeyFor returns the key under which a position should bucket for
+// a rule's group_by. underlying and symbol coincide for stocks today
+// (the leg's Underlying is the symbol); they are documented as separate
+// for forward compatibility with options keying by option symbol.
+func groupKeyFor(groupBy string, facts positionFacts) string {
+	switch groupBy {
+	case "underlying", "symbol":
+		return facts.primarySymbol
+	}
+	return ""
+}
+
 // factsActivation builds the `position` namespace for CEL evaluation.
 func (f positionFacts) activation() map[string]any {
 	return map[string]any{
