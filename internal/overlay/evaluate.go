@@ -28,10 +28,11 @@ type positionEntry struct {
 // reference data and returns the attributed HouseRequirement. It does
 // not mutate acct or snap.
 //
-// This issue (#43) implements position-scope rules only with modes
-// add / max / floor. Account-, symbol-, and group-scope rules and the
-// block mode are skipped silently — their issues land later. Option
-// positions are also skipped per the issue scope.
+// Position- and group-scope rules are implemented with modes
+// add / max / floor. Account- and symbol-scope rules and the block
+// mode are skipped silently — their issues land later. Option
+// positions are also skipped (the overlay does not yet model option
+// facts).
 func (e *Engine) Evaluate(
 	acct account.Account,
 	snap account.AccountSnapshot,
