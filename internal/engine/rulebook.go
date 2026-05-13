@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/google/cel-go/cel"
@@ -109,7 +110,16 @@ func LoadRulebook(path string) (*Rulebook, error) {
 				return nil, fmt.Errorf("invalid rulebook: rule %s constraint %q: %w", r.ID, c, err)
 			}
 		}
-		for label, expr := range formulaExprs(r) {
+		// Sort labels so error wrapping is deterministic when multiple
+		// formulas would fail — Go map iteration is randomized.
+		exprs := formulaExprs(r)
+		labels := make([]string, 0, len(exprs))
+		for label := range exprs {
+			labels = append(labels, label)
+		}
+		sort.Strings(labels)
+		for _, label := range labels {
+			expr := exprs[label]
 			if expr == "" {
 				continue
 			}

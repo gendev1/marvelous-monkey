@@ -482,6 +482,32 @@ rules:
 	assertRulebookError(t, err, "formula must return a number")
 }
 
+// Proceeds formulas (initial_proceeds / maintenance_proceeds) go through the
+// same compile path as initial / maintenance, so they must be type-asserted
+// too. Without coverage here, a regression that drops them from formulaExprs()
+// would still pass the other formula tests.
+func TestLoadRulebook_proceedsNonNumericRejects(t *testing.T) {
+	err := loadRulebookFromYAML(t, `
+schema_version: "1"
+rates:
+  equity: { base_pct: 0.20, min_pct: 0.10 }
+rules:
+  - id: bool_proceeds
+    match:
+      legs:
+        - { name: a, side: long, kind: option }
+    formulas:
+      margin:
+        initial:           "0.0"
+        maintenance:       "0.0"
+        initial_proceeds:  "1 == 1"
+`)
+	assertRulebookError(t, err, "formula must return a number")
+	if !strings.Contains(err.Error(), "margin.initial_proceeds") {
+		t.Fatalf("error %q lacks formula label 'margin.initial_proceeds'", err.Error())
+	}
+}
+
 // Double-typed formulas (the common case) must continue to load cleanly.
 func TestLoadRulebook_doubleFormulaLoads(t *testing.T) {
 	err := loadRulebookFromYAML(t, `
