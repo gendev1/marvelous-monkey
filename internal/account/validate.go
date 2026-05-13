@@ -57,6 +57,10 @@ func validate(account Account) error {
 		}
 	}
 
+	// Position IDs must be non-empty and unique. Empty IDs are rejected here
+	// (rather than deferred to Aggregate) so the failure mode is uniform
+	// across Aggregate and AggregateWithRulebook and surfaces at the earliest
+	// point. See issue #30.
 	seen := make(map[string]struct{}, len(account.Positions))
 	for i, p := range account.Positions {
 		if p.ID == "" {

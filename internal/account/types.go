@@ -27,7 +27,9 @@ type Account struct {
 
 // AccountPosition wraps engine.Position with a stable identifier so position
 // identity can travel into PositionEvaluation.PositionID and into error /
-// violation reports without polluting the engine's input shape.
+// violation reports without polluting the engine's input shape. ID must be
+// non-empty and unique within an Account; the validator rejects both empty
+// and duplicate IDs.
 type AccountPosition struct {
 	ID       string
 	Position engine.Position
