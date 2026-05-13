@@ -397,10 +397,10 @@ func hasAnyOutput(r Rule) bool {
 //
 // Design choice: the rule-shape helpers used here (requireSameStringField,
 // requireExpirationSlots, requireSingleUnderlying) remain in Go rather than
-// migrating to CEL match.constraints. The strict-typing audit walked all 28
-// checks reachable from this function (research-validation-audit.md §E.1–E.28)
-// and classified each as "still needed" — none are made redundant by the typed
-// Leg. Two structural reasons keep them Go-side:
+// migrating to CEL match.constraints. The CEL-typing epic audit walked all
+// checks reachable from this function and classified them as still needed:
+// none are made redundant by a typed Leg. Two structural reasons keep them
+// Go-side:
 //
 //  1. Blank-string equality. requireSameStringField rejects two legs whose
 //     underlying / expiration / venue fields are both "". In CEL,
@@ -413,9 +413,12 @@ func hasAnyOutput(r Rule) bool {
 //     runs against generic_limited_risk_combo, whose legs_pattern: all_options
 //     binds an arbitrary number of legs. CEL constraints address slots by name
 //     (legs.a, legs.b, ...), so a constraint cannot iterate the bound set to
-//     assert "every leg shares one underlying". The same iteration-over-bound-set
-//     problem applies to requireExpirationSlots' near/far ordering checks under
-//     shape variants.
+//     assert "every leg shares one underlying".
+//
+// requireExpirationSlots stays Go-side for a related but narrower reason: it
+// validates that expiration fields are present and parseable dates before CEL
+// constraints compare them as strings. CEL can compare strings, but it does
+// not know that "" or "not-a-date" are invalid expirations.
 //
 // The four "new failing" cases surfaced by the audit (vertical blank
 // underlying / blank expiration / blank venue, generic mixed underlyings) are
