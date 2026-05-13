@@ -310,35 +310,31 @@ func isLimitedRisk(legsVal ref.Val) ref.Val {
 }
 
 // sumPremiums adds qty*mult*<field> for every option leg on `side`. The
-// premium field name (`P` / `P0`) is passed by the caller so this helper
-// stays a one-stop replacement for the previous traits.Mapper.Get path.
+// only premium fields the rulebook passes are `P` and `P0` (see
+// rules/cboe_baseline.yaml); any other name is a CEL/YAML typo and surfaces
+// as a hard error rather than a silent zero — same fail-loud contract as
+// rate() per CLAUDE.md "Required Rules".
 func sumPremiums(legsVal ref.Val, field string, side Side) ref.Val {
+	var premium func(Leg) float64
+	switch field {
+	case "P":
+		premium = func(l Leg) float64 { return l.P }
+	case "P0":
+		premium = func(l Leg) float64 { return l.P0 }
+	default:
+		return types.NewErr("sum_premiums: unknown premium field %q (want \"P\" or \"P0\")", field)
+	}
 	total := 0.0
 	if err := forEachLeg(legsVal, func(l Leg) bool {
 		if l.Kind != OptionKind || l.Side != side {
 			return true
 		}
-		total += legPremium(l, field) * l.Qty * l.Mult
+		total += premium(l) * l.Qty * l.Mult
 		return true
 	}); err != nil {
 		return err
 	}
 	return types.Double(total)
-}
-
-// legPremium reads the named premium field off a typed Leg. The only two
-// fields the rulebook ever passes to sum_*_premiums are `P` and `P0` (see
-// rules/cboe_baseline.yaml); a typo here would silently zero out, which is
-// the exact failure mode this refactor was meant to eliminate, so any other
-// name panics at load via the rulebook compile path — not at eval.
-func legPremium(l Leg, field string) float64 {
-	switch field {
-	case "P":
-		return l.P
-	case "P0":
-		return l.P0
-	}
-	return 0
 }
 
 // --- helpers for unwrapping ref.Val ---

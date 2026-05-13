@@ -173,6 +173,22 @@ func TestForEachLeg_visitsEveryTypedLeg(t *testing.T) {
 	}
 }
 
+// An unknown premium field name is a YAML/CEL typo, not a zero. sumPremiums
+// must surface it as a CEL error — same fail-loud contract as rate().
+func TestSumPremiums_unknownFieldErrors(t *testing.T) {
+	legs := legsVal(t, map[string]Leg{
+		"lp": {Kind: OptionKind, Side: Long, OptionType: "put", K: 100, P: 4.0, Qty: 1, Mult: 100},
+	})
+	got := sumPremiums(legs, "Pnope", Long)
+	if _, ok := got.(types.Double); ok {
+		t.Fatalf("got %v (a Double), want CEL error", got)
+	}
+	err, _ := got.Value().(error)
+	if err == nil || !strings.Contains(err.Error(), "unknown premium field") {
+		t.Fatalf("sumPremiums error %v missing substring %q", got.Value(), "unknown premium field")
+	}
+}
+
 // sumPremiums sums on the typed-leg path for both Long and Short and reads
 // the named field correctly.
 func TestSumPremiums_typedLeg(t *testing.T) {
