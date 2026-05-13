@@ -163,7 +163,8 @@ func (rb *Rulebook) compile(key, expr string, kind exprKind) (cel.Program, error
 	if iss.Err() != nil {
 		return nil, iss.Err()
 	}
-	if kind == kindFormula {
+	switch kind {
+	case kindFormula:
 		// Accept Double, Int, and DynType: conditional formulas whose branches
 		// both return Double can still be reported as DynType by cel-go's
 		// checker (see long_box_spread margin.initial). The eval-time
@@ -173,6 +174,15 @@ func (rb *Rulebook) compile(key, expr string, kind exprKind) (cel.Program, error
 			!outType.IsExactType(cel.IntType) &&
 			!outType.IsExactType(cel.DynType) {
 			return nil, fmt.Errorf("formula must return a number, got %s", outType)
+		}
+	case kindConstraint:
+		// Strictly require Bool. DynType is intentionally rejected: no real
+		// constraint needs leniency today, and tolerating it would re-enable
+		// the silent-no-match failure mode (out.Value().(bool) returning
+		// ok=false at eval) that this assertion exists to eliminate.
+		outType := ast.OutputType()
+		if !outType.IsExactType(cel.BoolType) {
+			return nil, fmt.Errorf("constraint must return bool, got %s", outType)
 		}
 	}
 	prog, err := rb.env.Program(ast)
