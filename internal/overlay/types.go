@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"margincalc/internal/account"
+
+	"github.com/google/cel-go/cel"
 )
 
 // errNotImplemented is the sentinel returned by stubs in this skeleton
@@ -19,15 +21,65 @@ var errNotImplemented = errors.New("overlay: not implemented")
 type Engine struct{}
 
 // Rulebook is the compiled, in-memory representation of the overlay
-// rule set. Loaded from one or more YAML files via LoadRulebook. The
-// zero value is empty and contains no rules.
-type Rulebook struct{}
+// rule set. Loaded from one or more YAML files via LoadRulebook. Safe
+// for concurrent reads once LoadRulebook returns — every CEL program is
+// compiled eagerly so there are no lazy-write paths.
+//
+// Note on currency (D4/D5): the loader emits no per-rule currency
+// filter and does not error on rules that omit currency. Currency is
+// implicit from Account.Currency at evaluation time.
+type Rulebook struct {
+	// OverlayRulebookHash is a SHA-256 over the concatenated bytes of
+	// the loaded YAML files (in input order, with a separator byte
+	// between files). Surfaced into HouseRequirement.Audit by issue 6.
+	OverlayRulebookHash string
 
-// LoadRulebook reads one or more overlay YAML files, validates them,
-// and returns a compiled Rulebook. In this skeleton it returns an empty
-// Rulebook and no error; the real loader lands in a later issue.
-func LoadRulebook(paths ...string) (*Rulebook, error) {
-	return &Rulebook{}, nil
+	constants map[string]any
+	rules     []overlayRule // sorted deterministic order
+}
+
+// CompiledRules returns the rules in deterministic evaluation order:
+// (priority asc, fileIndex asc, declIndex asc, id asc). Exported on the
+// package's unexported type via the in-package test surface; callers
+// outside overlay/ use the engine to consume rulebooks.
+func (rb *Rulebook) ruleCount() int { return len(rb.rules) }
+
+// overlayRule is the loaded + compiled representation of a single
+// overlay rule. Fields prefixed lowercase are populated by LoadRulebook
+// and treated as read-only after load.
+type overlayRule struct {
+	ID                 string
+	Priority           int
+	Scope              string
+	GroupBy            string
+	Applies            AppliesSpec
+	When               string
+	Mode               string
+	Basis              string
+	Formula            string
+	Reason             string
+	OnMissingReference string
+
+	// fileIndex is the position of the source file in the input list
+	// to LoadRulebook; declIndex is the rule's position within that
+	// file. Together with priority and id they form the sort key.
+	fileIndex int
+	declIndex int
+
+	whenProg    cel.Program
+	formulaProg cel.Program // nil when mode == "block" and formula is empty
+}
+
+// AppliesSpec captures the optional applicability filters on a rule.
+// All fields are inclusion lists; an empty list means "no filter, all
+// values match". Currencies is reserved for future use (see D4/D5);
+// loader does not validate its contents today.
+type AppliesSpec struct {
+	AccountTypes    []string `yaml:"account_types,omitempty"`
+	Phases          []string `yaml:"phases,omitempty"`
+	InstrumentKinds []string `yaml:"instrument_kinds,omitempty"`
+	Sides           []string `yaml:"sides,omitempty"`
+	Currencies      []string `yaml:"currencies,omitempty"`
 }
 
 // Evaluate runs every overlay rule against the snapshot and returns the
