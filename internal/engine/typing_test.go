@@ -105,6 +105,110 @@ rules:
 	}
 }
 
+// TestLoadRulebook_mplWrongArgFails asserts that calling mpl() with a
+// non-legs argument is rejected at load time by cel-go's overload resolver,
+// not silently zero-evaluated at runtime. The tightened signature
+// `mpl(map<string, engine.Leg>) → double` makes a string argument a type
+// mismatch the compiler can name.
+func TestLoadRulebook_mplWrongArgFails(t *testing.T) {
+	err := loadRulebookFromYAML(t, `
+schema_version: "1"
+rates:
+  equity: { base_pct: 0.20, min_pct: 0.10 }
+rules:
+  - id: r_mpl_bad
+    match:
+      legs:
+        - { name: opt, side: long, kind: option }
+    formulas:
+      margin:
+        initial: 'mpl("bad")'
+        maintenance: "0.0"
+`)
+	assertRulebookError(t, err, "found no matching overload for 'mpl'")
+	assertRulebookError(t, err, "r_mpl_bad")
+}
+
+// TestLoadRulebook_isLimitedRiskWrongArgFails covers the map-arg case for
+// the bool-returning predicate: a string where map<string, engine.Leg> is
+// expected must be a load-time overload mismatch.
+func TestLoadRulebook_isLimitedRiskWrongArgFails(t *testing.T) {
+	err := loadRulebookFromYAML(t, `
+schema_version: "1"
+rates:
+  equity: { base_pct: 0.20, min_pct: 0.10 }
+rules:
+  - id: r_ilr_bad
+    match:
+      legs:
+        - { name: opt, side: long, kind: option }
+      constraints:
+        - 'is_limited_risk("bad")'
+    formulas:
+      margin:
+        initial: "0.0"
+        maintenance: "0.0"
+`)
+	assertRulebookError(t, err, "found no matching overload for 'is_limited_risk'")
+	assertRulebookError(t, err, "r_ilr_bad")
+}
+
+// TestLoadRulebook_sumShortPremiumsWrongArgFails covers the two-arg map
+// case so a typoed first argument (string vs legs map) is caught at load.
+func TestLoadRulebook_sumShortPremiumsWrongArgFails(t *testing.T) {
+	err := loadRulebookFromYAML(t, `
+schema_version: "1"
+rates:
+  equity: { base_pct: 0.20, min_pct: 0.10 }
+rules:
+  - id: r_ssp_bad
+    match:
+      legs:
+        - { name: opt, side: short, kind: option }
+    formulas:
+      margin:
+        initial: 'sum_short_premiums("bad", "P0")'
+        maintenance: "0.0"
+`)
+	assertRulebookError(t, err, "found no matching overload for 'sum_short_premiums'")
+	assertRulebookError(t, err, "r_ssp_bad")
+}
+
+// TestLoadRulebook_shortCallReqWrongArgFails covers the single-leg first-arg
+// case. With short_call_req declared as
+// `(engine.Leg, double, string, double, double) → double`, a string in the
+// first position must fail overload resolution at load time. (short_put_req
+// shares the declaration shape — one representative test stands in for both.)
+func TestLoadRulebook_shortCallReqWrongArgFails(t *testing.T) {
+	err := loadRulebookFromYAML(t, `
+schema_version: "1"
+rates:
+  equity: { base_pct: 0.20, min_pct: 0.10 }
+rules:
+  - id: r_scr_bad
+    match:
+      legs:
+        - { name: sc, side: short, kind: option, option_type: call }
+    formulas:
+      margin:
+        initial: 'short_call_req("bad", U, class, lev, 0.0)'
+        maintenance: "0.0"
+`)
+	assertRulebookError(t, err, "found no matching overload for 'short_call_req'")
+	assertRulebookError(t, err, "r_scr_bad")
+}
+
+// TestLoadRulebook_baselineCompilesCleanly is the smoke test guarding the
+// signature tightening: if any baseline-rule callsite (e.g. mpl(legs),
+// is_limited_risk(legs), short_call_req(legs.sc, ...)) silently resolves to a
+// different overload after the change, this load fails. Pairs with the
+// negative tests above.
+func TestLoadRulebook_baselineCompilesCleanly(t *testing.T) {
+	if _, err := LoadRulebook("../../rules/cboe_baseline.yaml"); err != nil {
+		t.Fatalf("baseline rulebook should load cleanly: %v", err)
+	}
+}
+
 func writeTempRulebook(t *testing.T, content string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "rules.yaml")
