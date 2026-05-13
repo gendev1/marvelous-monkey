@@ -686,58 +686,6 @@ func hasAnyOutput(r Rule) bool {
 // note for the rejected migration to CEL constraints.
 func validateRuleInputs(ruleID string, bound map[string]Leg) error {
 	switch ruleID {
-	case "long_box_spread":
-		if err := requireExpirationSlots(ruleID, bound, "bc", "bp", "sp", "sc"); err != nil {
-			return err
-		}
-		if err := requireSameUnderlying(ruleID, bound, "bc", "bp", "sp", "sc"); err != nil {
-			return err
-		}
-		if err := requireSameStringField(ruleID, bound, "style", "bc", "bp", "sp", "sc"); err != nil {
-			return err
-		}
-		return requireSameContractSize(ruleID, bound, "bc", "bp", "sp", "sc")
-	case "short_box_spread":
-		if err := requireExpirationSlots(ruleID, bound, "bc", "bp", "sp", "sc"); err != nil {
-			return err
-		}
-		if err := requireSameUnderlying(ruleID, bound, "bc", "bp", "sp", "sc"); err != nil {
-			return err
-		}
-		if err := requireSameStringField(ruleID, bound, "style", "bc", "bp", "sp", "sc"); err != nil {
-			return err
-		}
-		return requireSameContractSize(ruleID, bound, "bc", "bp", "sp", "sc")
-	case "conversion":
-		if err := requireSameUnderlying(ruleID, bound, "lp", "sc"); err != nil {
-			return err
-		}
-		if err := requireExpirationSlots(ruleID, bound, "lp", "sc"); err != nil {
-			return err
-		}
-		return requireSameStringField(ruleID, bound, "style", "lp", "sc")
-	case "reverse_conversion":
-		if err := requireSameUnderlying(ruleID, bound, "lc", "sp"); err != nil {
-			return err
-		}
-		if err := requireExpirationSlots(ruleID, bound, "lc", "sp"); err != nil {
-			return err
-		}
-		if err := requireSameStringField(ruleID, bound, "style", "lc", "sp"); err != nil {
-			return err
-		}
-		if err := requirePositive(ruleID, "ss", "short_sale_proceeds", bound["ss"].ShortSaleProceeds); err != nil {
-			return err
-		}
-		return requirePositive(ruleID, "ss", "sale_price", bound["ss"].SalePrice)
-	case "collar":
-		if err := requireSameUnderlying(ruleID, bound, "lp", "sc"); err != nil {
-			return err
-		}
-		if err := requireExpirationSlots(ruleID, bound, "lp", "sc"); err != nil {
-			return err
-		}
-		return requireSameStringField(ruleID, bound, "style", "lp", "sc")
 	default:
 		return nil
 	}
