@@ -60,10 +60,10 @@ type Leg struct {
 	SalePrice         float64 `yaml:"sale_price,omitempty"          json:"sale_price,omitempty"`
 
 	// ETF/ETN fields
-	Price        float64 `yaml:"price,omitempty"        json:"price,omitempty"`
-	TracksIndex  string  `yaml:"tracks_index,omitempty" json:"tracks_index,omitempty"`
-	Leveraged    bool    `yaml:"leveraged,omitempty"    json:"leveraged,omitempty"`
-	KEquivalent  float64 `yaml:"K_equivalent,omitempty" json:"K_equivalent,omitempty"`
+	Price       float64 `yaml:"price,omitempty"        json:"price,omitempty"`
+	TracksIndex string  `yaml:"tracks_index,omitempty" json:"tracks_index,omitempty"`
+	Leveraged   bool    `yaml:"leveraged,omitempty"    json:"leveraged,omitempty"`
+	KEquivalent float64 `yaml:"K_equivalent,omitempty" json:"K_equivalent,omitempty"`
 }
 
 // Position is the input to the calculator.
@@ -98,33 +98,4 @@ type Result struct {
 	CashCall        float64 `json:"cash_call,omitempty"`
 	Permitted       bool    `json:"permitted"`
 	DepositKind     string  `json:"deposit_kind,omitempty"` // "cash_or_escrow" | "underlying_or_escrow" | etc.
-}
-
-// ToMap converts a Leg to a CEL-friendly map. Empty strings/zero-values are
-// kept so CEL access never errors on missing keys.
-func (l Leg) toMap() map[string]any {
-	return map[string]any{
-		"side":                       string(l.Side),
-		"kind":                       string(l.Kind),
-		"option_type":                l.OptionType,
-		"K":                          l.K,
-		"P":                          l.P,
-		"P0":                         l.P0,
-		"qty":                        l.Qty,
-		"mult":                       l.Mult,
-		"style":                      l.Style,
-		"venue":                      l.Venue,
-		"settle_style":               l.SettleStyle,
-		"expiration":                 l.Expiration,
-		"underlying":                 l.Underlying,
-		"time_to_expiration_months":  l.TimeToExpirationMonths,
-		"broker_guaranteed":          l.BrokerGuaranteed,
-		"shares":                     l.Shares,
-		"short_sale_proceeds":        l.ShortSaleProceeds,
-		"sale_price":                 l.SalePrice,
-		"price":                      l.Price,
-		"tracks_index":               l.TracksIndex,
-		"leveraged":                  l.Leveraged,
-		"K_equivalent":               l.KEquivalent,
-	}
 }

@@ -643,18 +643,11 @@ func (rb *Rulebook) evaluateOne(pos Position, rule Rule, accountType AccountType
 	if !ok {
 		return Result{}, false, nil
 	}
-	legsMap := map[string]any{}
-	for name, leg := range bound {
-		// Pass the Leg struct directly so the NativeTypes adapter wraps it
-		// via reflection; CEL field access uses reflect.Value.FieldByName and
-		// would panic on a map[string]any (see env.go legObjectTypeName).
-		legsMap[name] = leg
-	}
 	activation := map[string]any{
 		"U":         pos.U,
 		"class":     pos.Class,
 		"lev":       pos.Lev,
-		"legs":      legsMap,
+		"legs":      bound,
 		"constants": rb.constants,
 	}
 	// Constraints. A clean `false` demotes to "doesn't match"; a CEL eval
