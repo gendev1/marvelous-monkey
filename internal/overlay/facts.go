@@ -49,7 +49,7 @@ func derivePositionFacts(p account.AccountPosition, eval account.PositionEvaluat
 	}
 	pos := p.Position
 	for _, leg := range pos.Legs {
-		if leg.Kind == engine.OptionKind {
+		if !isStockLikeKind(leg.Kind) {
 			continue
 		}
 		mv := stockLikeMV(leg, pos.U)
@@ -70,6 +70,21 @@ func derivePositionFacts(p account.AccountPosition, eval account.PositionEvaluat
 	facts.netMV = facts.longMV - facts.shortMV
 	facts.symbol = facts.primarySymbol
 	return facts
+}
+
+// isStockLikeKind is the closed set of leg kinds the overlay's
+// position-scope evaluator recognizes. Filtering on this set (rather
+// than only on `!= OptionKind`) means a future leg kind added to the
+// engine cannot accidentally start triggering position-scope rules
+// here before the overlay's facts/activation surface has been
+// reviewed for it.
+func isStockLikeKind(kind engine.Kind) bool {
+	switch kind {
+	case engine.StockKind, engine.ETFKind, engine.ETNKind, engine.ConvertibleKind, engine.WarrantKind:
+		return true
+	default:
+		return false
+	}
 }
 
 // stockLikeMV mirrors account/market_value.go's legMarketValue but is

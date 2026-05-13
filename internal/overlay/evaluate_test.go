@@ -442,6 +442,53 @@ rules:
 	}
 }
 
+func TestEvaluate_NonStockLikeLegs_Ignored(t *testing.T) {
+	rb := loadRules(t, `schema_version: "1"
+rules:
+  - id: addon
+    scope: position
+    mode: add
+    formula: "100.0"
+`)
+	// An option-only position: not stock-like, so position-scope rules
+	// must not fire and no reference-data warning should be emitted.
+	optPos := account.AccountPosition{
+		ID: "p1",
+		Position: engine.Position{
+			U:     150,
+			Class: "equity",
+			Lev:   1,
+			Legs: []engine.Leg{{
+				Side:       engine.Long,
+				Kind:       engine.OptionKind,
+				OptionType: "call",
+				K:          150,
+				P:          5,
+				Qty:        1,
+				Mult:       100,
+				Underlying: "AAPL",
+				Venue:      "listed",
+			}},
+		},
+	}
+	acct := baseAccount(optPos)
+	snap := baseSnapshot(acct, []account.PositionEvaluation{{
+		PositionID: "p1",
+		Result:     engine.Result{Requirement: 500, CashCall: 500},
+	}})
+	e := &Engine{Rulebook: rb}
+	out, _ := e.Evaluate(acct, snap, ReferenceData{})
+	if len(out.Components) != 0 {
+		t.Errorf("non-stock-like position produced components: %v", out.Components)
+	}
+	if len(out.Warnings) != 0 {
+		t.Errorf("non-stock-like position should not emit ref-data warnings, got %v", out.Warnings)
+	}
+	if out.HouseRequirement != snap.TotalRequirement {
+		t.Errorf("HouseRequirement = %v, want %v (baseline passthrough)", out.HouseRequirement, snap.TotalRequirement)
+	}
+}
+
 func TestEvaluate_EvaluationError_SkipsPosition(t *testing.T) {
 	rb := loadRules(t, `schema_version: "1"
 rules:
