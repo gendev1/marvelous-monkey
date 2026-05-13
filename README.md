@@ -30,6 +30,12 @@ margincalc/
 │   │   ├── rulebook.go        LoadRulebook + Evaluate
 │   │   ├── rulebook_test.go   strategy / cash / guard tests
 │   │   └── bench_test.go      throughput benchmarks
+│   ├── account/               package account (positions → account snapshot)
+│   │   ├── types.go           Account, AccountPosition, AccountSnapshot, PositionEvaluation
+│   │   ├── validate.go        shape + per-leg market-value validation
+│   │   ├── market_value.go    leg → LMV/SMV bucket accumulation
+│   │   ├── aggregate.go       Aggregate + AggregateWithRulebook
+│   │   └── account_test.go    aggregation / rollup / zero-equity tests
 │   └── recon/                 package recon (CSV diff vs vendor)
 │       ├── recon.go
 │       ├── recon_test.go
@@ -101,6 +107,26 @@ res, _ := rb.Evaluate(pos, engine.MarginAccount, engine.Initial)
 - **European calendar spread broker overrides** — manual flags these as broker-specific.
 - **European long box in a cash account** — relies on loan-value mechanism (margin-only).
 
+## The account aggregator
+
+`internal/account/` rolls per-position engine results into a vendor-comparable `AccountSnapshot` — LMV / SMV buckets, current equity, adjusted balance, leverage ratios, and a `DepositRequirements` map keyed by `DepositKind`.
+
+```go
+import "margincalc/internal/account"
+
+snap, err := account.AggregateWithRulebook(rb, acct)        // evaluate + aggregate
+snap, err := account.Aggregate(acct, evals)                 // caller-supplied evaluations
+```
+
+Resolved v1 decisions:
+
+- **SMV sign convention.** `SMVStock` and `SMVOption` carry positive magnitudes. Sign math lives in the derived fields — `NetMV = LMVStock + LMVOption − SMVStock − SMVOption`, `AdjustedBalance = CurrentEquity − (LMVStock + LMVOption) + SMVOption`.
+- **Equity source.** `CurrentEquity = SODEquity + PnL + DepositsWithdrawals` for v1. `CashBalance + NetMV` is a future alternative once vendor cash is reliable enough to use as the primary source.
+- **Bucket rollup.** ETF / ETN / convertible / warrant legs roll into `LMVStock` / `SMVStock` in v1; no separate buckets until a downstream consumer needs them.
+- **Zero-equity policy.** When `CurrentEquity <= 0`, leverage and equity-ratio fields are `0` and a warning is appended; no `Inf` / `NaN` propagates to consumers.
+
+See `ROADMAP.md` (Layer 2) for the deeper rationale and the path to account-level reconciliation.
+
 ## The rule set
 
 `rules/cboe_baseline.yaml` is the regulatory baseline. Your firm's actual production rules are stricter and live (today) inside the vendor; encode them in `rules/house_rules.yaml` using the schema in `rules/house_rules.example.yaml` as you discover them via reconciliation.
@@ -128,6 +154,8 @@ go run ./cmd/recon \
 Produces a summary (MATCH / DIFF subdivided by size / NO_RULE / ERROR) plus a per-position `diff.csv`. Sample CSVs in `internal/recon/testdata/`.
 
 The DIFF rows clustered by `rule_id` are the firm's house policy made visible. Use them to populate `rules/house_rules.yaml` over time.
+
+Account-level reconciliation (diffing `AccountSnapshot` against vendor account rows) is deferred pending a vendor API contract — `cmd/recon` is per-position only today.
 
 ## Future work — where it lands
 

@@ -8,7 +8,7 @@ Strategy-based RegT engine. Three-layer architecture. Vendor-free.
 
 | Tests | Cboe examples | Rules | Layers | Active | Backlog |
 |------:|--------------:|------:|-------:|-------:|--------:|
-| 104   | 22            | 20    | 3      | 1      | 6       |
+| 104   | 22            | 20    | 3      | 0      | 5       |
 
 ## Three layers
 
@@ -25,16 +25,16 @@ Reg T strategy match. CEL rules from YAML, per-position formula evaluation.
 
 *92 tests · `internal/engine`*
 
-### Layer 2 · Account container + aggregation — **in progress** (~55%)
+### Layer 2 · Account container + aggregation — **ready** (~90%)
 
 Positions → Account → vendor-comparable account state (LMV / SMV / equity / adjusted-balance).
 
 - [x] `Account` / `AccountPosition` / `AccountSnapshot`
 - [x] `PositionEvaluation` with `NoRule` / `Violation` as first-class outcomes
 - [x] `validate(account)` — shape + per-leg market-value validation
-- [x] `Aggregate(account) → AccountSnapshot`
+- [x] `Aggregate(account) → AccountSnapshot` (+ `AggregateWithRulebook`)
 - [x] `DepositRequirements` rollup by kind
-- [ ] Account-level reconciliation harness
+- [ ] Account-level reconciliation harness — deferred pending vendor API contract
 
 *12 tests · `internal/account`*
 
@@ -53,21 +53,19 @@ Firm-specific add-ons applied on top of L1 + L2 outputs. The number the customer
 
 ## Active
 
-| #  | Item                                                                                                                                                                              | Layer   | Status |
-|---:|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|--------|
-| 03 | **`Aggregate(account) → AccountSnapshot`** — Types + validator already on main; only the aggregation function remains. Uses Sterling field names so recon is apples-to-apples. | Layer 2 | next   |
+_None — Layer 2 aggregator landed; next active item picks up from the backlog once sequencing is confirmed._
 
 ## Done · recently landed
 
 | #  | Item                                                                                                                                                                                                            | Layer   | Status |
 |---:|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|--------|
+| 03 | **`Aggregate(account) → AccountSnapshot`** — `Aggregate` + `AggregateWithRulebook` shipped in `internal/account/`. Sterling-named LMV/SMV/equity/adjusted-balance fields; `DepositRequirements` rollup by kind. | Layer 2 | done   |
 | 01 | **Engine correctness hardening** — `mpl` samples U=0, signed `qty*mult`, bounded put-ratio + mismatched-mult tests, typed Leg, load-time overload-mismatch, `validateLeg` invariants — all on main.            | Layer 1 | done   |
 
 ## Backlog · sequenced, not yet started
 
 | #  | Item                                                                                                                                                                                                | Layer    | Status |
 |---:|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------|--------|
-| 04 | **Account-level reconciliation** — Extend `cmd/recon` to ingest vendor account-level rows and diff against `AccountSnapshot`.                                                                       | Layer 2  | later  |
 | 05 | **Rule-set versioning + audit trail** — Stamp `Result` with the rulebook SHA; persist inputs/outputs to a sqlite/parquet log.                                                                       | Layer 1  | later  |
 | 06 | **House rulebook composition** — Multi-file loader with deterministic precedence. `house_rules.example.yaml` schema already landed.                                                                 | Layer 1  | later  |
 | 07 | **House / broker overlay add-ons** — Vol, low-price floor, market-cap, ADV / liquidity, concentration. Consumes L1 `Result` + L2 `AccountSnapshot`, emits `HouseRequirement`.                       | Layer 3  | later  |
@@ -78,6 +76,7 @@ Firm-specific add-ons applied on top of L1 + L2 outputs. The number the customer
 
 | #  | Item                                                                                                                                                                                                | Layer   | Status   |
 |---:|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|----------|
+| 04 | **Account-level reconciliation — deferred pending vendor API contract** — Extend `cmd/recon` to ingest vendor account-level rows and diff against `AccountSnapshot`. Current per-position harness is forgiving by design; account-level diffing waits on a stable vendor API contract before the schema is worth pinning down.                                                                                          | Layer 2 | deferred |
 | 02 | **Reconciliation v2: fail loudly on bad data** — Header / enum / `NaN` / duplicate-ID validation. Only needed before nightly vendor runs; current forgiving harness is fine for spot checks.       | L1 tool | deferred |
 | 10 | **Full TIMS / pricing layer** — OCC scenario grid, vol surface, binomial American pricing. Separate project. Wait until L1 + L2 + L3 reconcile against the vendor.                                  | Layer 1 | deferred |
 
@@ -91,12 +90,7 @@ Firm-specific add-ons applied on top of L1 + L2 outputs. The number the customer
 
 ## Sequencing
 
-Engine correctness (#01) is done. The middle items (#05 – #09) only become verifiable once two more foundations land:
-
-1. The `Aggregate()` half of Layer 2 (#03).
-2. Evidence that account numbers agree with the vendor (#04).
-
-Without them, overlays, shocks, and decomp produce unfalsifiable numbers. Recon hardening (#02) gets revisited when nightly vendor runs are actually on the table — until then the current forgiving harness is fine for spot checks.
+Engine correctness (#01) and the Layer 2 aggregator (#03) are done. The middle items (#05 – #09) only become fully verifiable once vendor account numbers can be diffed against `AccountSnapshot` — but account-level reconciliation (#04) is parked until a vendor API contract exists, so unblocking happens through the contract conversation rather than the codebase. Recon hardening (#02) gets revisited when nightly vendor runs are actually on the table — until then the current forgiving harness is fine for spot checks.
 
 ---
 
