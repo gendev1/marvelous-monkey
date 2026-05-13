@@ -617,6 +617,10 @@ rules:
       # MPL computed only at the existing strikes — missing the U→∞ blow-up.
       constraints:
         - is_limited_risk(legs)
+    requires:
+      all_slots:
+        required_fields: [underlying]
+        same_field: underlying
     formulas:
       cash:
         # Cash-secured multi-leg limited-risk combo: max loss on deposit plus

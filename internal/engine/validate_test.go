@@ -379,6 +379,60 @@ func TestRuleInputValidation_shortPutShortStockMissingShortSaleProceeds(t *testi
 	mustValidationError(t, rb, pos)
 }
 
+// generic_limited_risk_combo now expresses its precondition via the YAML
+// `requires.all_slots` block; the Go shape-case for it has been deleted.
+// These tests pin the runtime behaviour driven by that YAML.
+
+// A long butterfly with one leg's underlying blank: validateRequirements must
+// reject it before the formulas run. Without this, the cash-CEL would happily
+// price the structure on a leg set whose underlying is unspecified.
+func TestRequires_GenericLimitedRiskCombo_BlankUnderlyingRejected(t *testing.T) {
+	rb := loadRB(t)
+	pos := Position{
+		U: 550.0, Class: "equity",
+		Legs: []Leg{
+			{Side: Long, Kind: OptionKind, OptionType: "put",
+				K: 540, P: 5.60, P0: 5.60, Qty: 1, Mult: 100, Style: "american", Underlying: "XYZ"},
+			{Side: Short, Kind: OptionKind, OptionType: "put",
+				K: 550, P: 7.20, P0: 7.20, Qty: 2, Mult: 100, Style: "american", Underlying: "XYZ"},
+			{Side: Long, Kind: OptionKind, OptionType: "put",
+				K: 555, P: 9.80, P0: 9.80, Qty: 1, Mult: 100, Style: "american", Underlying: ""},
+		},
+	}
+	mustValidationError(t, rb, pos)
+}
+
+// Three legs with two distinct underlyings. Slot iteration is sorted, so the
+// error message names the values in a deterministic order — the test pins
+// both the "invalid position" prefix and the specific two-value mismatch
+// substring.
+func TestRequires_GenericLimitedRiskCombo_MixedUnderlyingsRejected(t *testing.T) {
+	rb := loadRB(t)
+	pos := Position{
+		U: 550.0, Class: "equity",
+		Legs: []Leg{
+			{Side: Long, Kind: OptionKind, OptionType: "put",
+				K: 540, P: 5.60, P0: 5.60, Qty: 1, Mult: 100, Style: "american", Underlying: "AAA"},
+			{Side: Short, Kind: OptionKind, OptionType: "put",
+				K: 550, P: 7.20, P0: 7.20, Qty: 2, Mult: 100, Style: "american", Underlying: "AAA"},
+			{Side: Long, Kind: OptionKind, OptionType: "put",
+				K: 555, P: 9.80, P0: 9.80, Qty: 1, Mult: 100, Style: "american", Underlying: "BBB"},
+		},
+	}
+	_, err := rb.Evaluate(pos, MarginAccount, Initial)
+	if err == nil {
+		t.Fatalf("Evaluate: expected validation error, got nil")
+	}
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "invalid position") {
+		t.Fatalf("error %q lacks 'invalid position' prefix", msg)
+	}
+	want := `requires one underlying for mpl(legs), got "AAA" and "BBB"`
+	if !strings.Contains(msg, want) {
+		t.Fatalf("error %q does not contain %q", msg, want)
+	}
+}
+
 // -----------------------------------------------------------------------------
 // Rulebook schema validation. Each test writes a minimal YAML stub exhibiting
 // exactly one failure mode, loads it, and asserts the "invalid rulebook" prefix
