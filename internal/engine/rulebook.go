@@ -46,8 +46,71 @@ type RuleFormulas struct {
 type Rule struct {
 	ID       string       `yaml:"id"`
 	Match    MatchSpec    `yaml:"match"`
+	Requires RequireSpec  `yaml:"requires,omitempty"`
 	Formulas RuleFormulas `yaml:"formulas"`
 }
+
+// RequireSpec is the declarative pre-formula validation block. Each rule may
+// declare which slot/field combinations must be present, positive, equal across
+// slots, or above a CEL-expressed lower bound. The schema is structurally
+// validated at load time (see validateRequires); a future issue wires a runtime
+// interpreter that produces "invalid position:" errors before formula eval.
+type RequireSpec struct {
+	RequiredFields   map[string][]string   `yaml:"required_fields,omitempty"`
+	PositiveFields   map[string][]string   `yaml:"positive_fields,omitempty"`
+	ExpirationSlots  []string              `yaml:"expiration_slots,omitempty"`
+	SameAcrossSlots  []SameAcrossSlotsSpec `yaml:"same_across_slots,omitempty"`
+	SameContractSize [][]string            `yaml:"same_contract_size,omitempty"`
+	MinFields        []MinFieldSpec        `yaml:"min_fields,omitempty"`
+	AllSlots         *AllSlotsSpec         `yaml:"all_slots,omitempty"`
+}
+
+type SameAcrossSlotsSpec struct {
+	Field string   `yaml:"field"`
+	Slots []string `yaml:"slots"`
+}
+
+// MinFieldSpec asserts legs.<slot>.<field> >= <gte>. GTE compiles against the
+// same CEL environment as match.constraints — legs/U/class/lev/constants are
+// in scope. The load-time validator only checks that it parses to a numeric
+// type; runtime-type assertions on the bound value live in the future
+// interpreter.
+type MinFieldSpec struct {
+	Slot  string `yaml:"slot"`
+	Field string `yaml:"field"`
+	GTE   string `yaml:"gte"`
+}
+
+// AllSlotsSpec is the only requires shape valid under legs_pattern: all_options.
+// Slots aren't named there, so checks apply to every bound leg.
+type AllSlotsSpec struct {
+	RequiredFields []string `yaml:"required_fields,omitempty"`
+	SameField      string   `yaml:"same_field,omitempty"`
+}
+
+// Closed whitelists shared between the load-time validator and (issue 2) the
+// runtime interpreter. Kept package-level so the field accessor work in the
+// next issue can reuse the exact same sets without re-deriving them.
+var (
+	requireStringFields = map[string]struct{}{
+		"underlying":   {},
+		"style":        {},
+		"venue":        {},
+		"settle_style": {},
+		"tracks_index": {},
+	}
+	requireNumericFields = map[string]struct{}{
+		"qty":                       {},
+		"mult":                      {},
+		"K":                         {},
+		"price":                     {},
+		"time_to_expiration_months": {},
+		"shares":                    {},
+		"short_sale_proceeds":       {},
+		"sale_price":                {},
+		"K_equivalent":              {},
+	}
+)
 
 type rawRulebook struct {
 	SchemaVersion string                        `yaml:"schema_version"`
@@ -109,6 +172,14 @@ func LoadRulebook(path string) (*Rulebook, error) {
 		for _, c := range r.Match.Constraints {
 			if _, err := rb.compile(r.ID+"/c:"+c, c, kindConstraint); err != nil {
 				return nil, fmt.Errorf("invalid rulebook: rule %s constraint %q: %w", r.ID, c, err)
+			}
+		}
+		for _, mf := range r.Requires.MinFields {
+			// Include the gte expression in the key so two entries sharing
+			// (slot, field) but differing on gte don't collide in rb.progs.
+			key := r.ID + "/req:gte:" + mf.Slot + "." + mf.Field + ":" + mf.GTE
+			if _, err := rb.compile(key, mf.GTE, kindFormula); err != nil {
+				return nil, fmt.Errorf("invalid rulebook: rule %s min_fields legs.%s.%s gte %q: %w", r.ID, mf.Slot, mf.Field, mf.GTE, err)
 			}
 		}
 		// Sort labels so error wrapping is deterministic when multiple
@@ -394,9 +465,154 @@ func validateRule(r Rule) error {
 			return err
 		}
 	}
+	if err := validateRequires(r); err != nil {
+		return err
+	}
 	if !hasAnyOutput(r) {
 		return fmt.Errorf("invalid rulebook: rule %q has no formula, permitted, or deposit_kind in either cash or margin block", r.ID)
 	}
+	return nil
+}
+
+// validateRequires structurally checks rule.Requires against the rule's slot
+// declarations and the closed field whitelist. CEL compilation of min_fields
+// gte expressions happens in LoadRulebook after the env exists; this function
+// only checks shape so it can run before env build.
+//
+// Note on gte return-type checking: we assert numeric output via the existing
+// kindFormula compile path. A gte that parses but returns a non-numeric type
+// is rejected here. Runtime-type assertions on the *bound value* of legs.x.f
+// are out of scope for this issue (defer to the interpreter in #34).
+func validateRequires(r Rule) error {
+	spec := r.Requires
+	isAll := r.Match.LegsPattern == "all_options"
+
+	slotNames := map[string]struct{}{}
+	for _, s := range r.Match.Legs {
+		slotNames[s.Name] = struct{}{}
+	}
+
+	checkSlot := func(where, slot string) error {
+		if isAll {
+			return fmt.Errorf("invalid rulebook: rule %q requires.%s references slot %q but legs_pattern is all_options (use all_slots)", r.ID, where, slot)
+		}
+		if _, ok := slotNames[slot]; !ok {
+			return fmt.Errorf("invalid rulebook: rule %q requires.%s references unknown slot %q", r.ID, where, slot)
+		}
+		return nil
+	}
+
+	checkField := func(where, field, expected string) error {
+		_, isStr := requireStringFields[field]
+		_, isNum := requireNumericFields[field]
+		switch expected {
+		case "string":
+			if !isStr {
+				if isNum {
+					return fmt.Errorf("invalid rulebook: rule %q requires.%s field %q is numeric, expected a string field", r.ID, where, field)
+				}
+				return fmt.Errorf("invalid rulebook: rule %q requires.%s field %q is not a known string field", r.ID, where, field)
+			}
+		case "numeric":
+			if !isNum {
+				if isStr {
+					return fmt.Errorf("invalid rulebook: rule %q requires.%s field %q is a string field, expected a numeric field", r.ID, where, field)
+				}
+				return fmt.Errorf("invalid rulebook: rule %q requires.%s field %q is not a known numeric field", r.ID, where, field)
+			}
+		case "any":
+			if !isStr && !isNum {
+				return fmt.Errorf("invalid rulebook: rule %q requires.%s field %q is not a known leg field", r.ID, where, field)
+			}
+		}
+		return nil
+	}
+
+	if spec.AllSlots != nil && !isAll {
+		return fmt.Errorf("invalid rulebook: rule %q has requires.all_slots but legs_pattern is not all_options", r.ID)
+	}
+
+	for slot, fields := range spec.RequiredFields {
+		if err := checkSlot("required_fields", slot); err != nil {
+			return err
+		}
+		for _, f := range fields {
+			if err := checkField("required_fields", f, "any"); err != nil {
+				return err
+			}
+		}
+	}
+
+	for slot, fields := range spec.PositiveFields {
+		if err := checkSlot("positive_fields", slot); err != nil {
+			return err
+		}
+		for _, f := range fields {
+			if err := checkField("positive_fields", f, "numeric"); err != nil {
+				return err
+			}
+		}
+	}
+
+	for _, slot := range spec.ExpirationSlots {
+		if err := checkSlot("expiration_slots", slot); err != nil {
+			return err
+		}
+	}
+
+	for _, sa := range spec.SameAcrossSlots {
+		if sa.Field == "" {
+			return fmt.Errorf("invalid rulebook: rule %q same_across_slots entry has empty field", r.ID)
+		}
+		if err := checkField("same_across_slots", sa.Field, "string"); err != nil {
+			return err
+		}
+		if len(sa.Slots) < 2 {
+			return fmt.Errorf("invalid rulebook: rule %q same_across_slots field %q requires at least two slots, got %d", r.ID, sa.Field, len(sa.Slots))
+		}
+		for _, s := range sa.Slots {
+			if err := checkSlot("same_across_slots", s); err != nil {
+				return err
+			}
+		}
+	}
+
+	for i, group := range spec.SameContractSize {
+		if len(group) < 2 {
+			return fmt.Errorf("invalid rulebook: rule %q same_contract_size group %d requires at least two slots, got %d", r.ID, i, len(group))
+		}
+		for _, s := range group {
+			if err := checkSlot("same_contract_size", s); err != nil {
+				return err
+			}
+		}
+	}
+
+	for _, mf := range spec.MinFields {
+		if err := checkSlot("min_fields", mf.Slot); err != nil {
+			return err
+		}
+		if err := checkField("min_fields", mf.Field, "numeric"); err != nil {
+			return err
+		}
+		if mf.GTE == "" {
+			return fmt.Errorf("invalid rulebook: rule %q min_fields entry for legs.%s.%s has empty gte", r.ID, mf.Slot, mf.Field)
+		}
+	}
+
+	if spec.AllSlots != nil {
+		for _, f := range spec.AllSlots.RequiredFields {
+			if err := checkField("all_slots.required_fields", f, "any"); err != nil {
+				return err
+			}
+		}
+		if spec.AllSlots.SameField != "" {
+			if err := checkField("all_slots.same_field", spec.AllSlots.SameField, "string"); err != nil {
+				return err
+			}
+		}
+	}
+
 	return nil
 }
 
