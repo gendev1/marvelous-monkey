@@ -610,3 +610,59 @@ func TestShortCallLongWarrant_marketCap_p14(t *testing.T) {
 	res := mustEvaluate(t, rb, pos, MarginAccount, Maintenance)
 	assertClose(t, "p14 SC+LW maintenance cap binds", res.Requirement, 5000.00)
 }
+
+// -----------------------------------------------------------------------------
+// p.14 — Short Index Call + Long ETF tracking that index (formula-only; no
+// worked numeric example in the manual, expected values derived by applying
+// the stated rule). K_equivalent is the strike-equivalent on the *ETF* leg
+// — it is a property of the ETF position, not the index option — so both the
+// formula and the rule-level validator key it off `le`.
+// -----------------------------------------------------------------------------
+// Setup: Long 100 XYZ_ETF @ $450, short 1 XYZ_INDEX Mar 4500 call @ $10.
+// ETF tracks the index, KEquivalent on the ETF leg = $460.
+// Margin initial:     50% * 450 * 100             = $22,500.00
+// Margin maintenance: 25% * min(450, 460) * 100   = $11,250.00
+func TestShortIndexCallLongETF_margin_p14(t *testing.T) {
+	rb := loadRB(t)
+	pos := Position{
+		U:     450.0,
+		Class: "equity",
+		Legs: []Leg{
+			{Side: Short, Kind: OptionKind, OptionType: "call",
+				K: 4500, P: 10.0, P0: 10.0, Qty: 1, Mult: 100,
+				Underlying: "XYZ_INDEX"},
+			{Side: Long, Kind: ETFKind,
+				Price: 450.0, Shares: 100, KEquivalent: 460.0,
+				TracksIndex: "XYZ_INDEX", Leveraged: false},
+		},
+	}
+	res := mustEvaluate(t, rb, pos, MarginAccount, Initial)
+	if res.RuleID != "short_index_call_long_etf" {
+		t.Errorf("matched %s, want short_index_call_long_etf", res.RuleID)
+	}
+	assertClose(t, "p14 SIC+LETF margin initial", res.Requirement, 22500.00)
+
+	res = mustEvaluate(t, rb, pos, MarginAccount, Maintenance)
+	assertClose(t, "p14 SIC+LETF margin maintenance", res.Requirement, 11250.00)
+}
+
+// Maintenance value cap: when ETF market value exceeds the strike-equivalent,
+// the 25% is applied to KEquivalent, not the market price.
+// Setup: ETF @ $500, KEquivalent $460 → 0.25 * 460 * 100 = $11,500.
+func TestShortIndexCallLongETF_maintenanceCap_p14(t *testing.T) {
+	rb := loadRB(t)
+	pos := Position{
+		U:     500.0,
+		Class: "equity",
+		Legs: []Leg{
+			{Side: Short, Kind: OptionKind, OptionType: "call",
+				K: 4600, P: 15.0, P0: 15.0, Qty: 1, Mult: 100,
+				Underlying: "XYZ_INDEX"},
+			{Side: Long, Kind: ETFKind,
+				Price: 500.0, Shares: 100, KEquivalent: 460.0,
+				TracksIndex: "XYZ_INDEX", Leveraged: false},
+		},
+	}
+	res := mustEvaluate(t, rb, pos, MarginAccount, Maintenance)
+	assertClose(t, "p14 SIC+LETF maintenance cap binds", res.Requirement, 11500.00)
+}

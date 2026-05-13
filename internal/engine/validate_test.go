@@ -168,6 +168,36 @@ func TestValidate_warrantMissingKEquivalent(t *testing.T) {
 	mustValidationError(t, rb, pos)
 }
 
+// short_index_call_long_etf K_equivalent lives on the ETF leg (`le`), not on
+// the short index call (`sc`). The maintenance formula reads
+// `min(le.price, le.K_equivalent)` — a zero KEquivalent on the ETF leg would
+// collapse that minimum to 0 and produce a confidently-wrong $0 requirement,
+// which is the failure mode validateRuleInputs exists to catch.
+func TestRuleInputValidation_shortIndexCallLongETFMissingKEquivalent(t *testing.T) {
+	rb := loadRB(t)
+	pos := Position{
+		U: 450.0, Class: "equity",
+		Legs: []Leg{
+			{Side: Short, Kind: OptionKind, OptionType: "call",
+				K: 4500, P: 10.0, P0: 10.0, Qty: 1, Mult: 100,
+				Underlying: "XYZ_INDEX"},
+			{Side: Long, Kind: ETFKind,
+				Price: 450.0, Shares: 100, KEquivalent: 0,
+				TracksIndex: "XYZ_INDEX", Leveraged: false},
+		},
+	}
+	_, err := rb.Evaluate(pos, MarginAccount, Initial)
+	if err == nil {
+		t.Fatalf("expected validation error for le.KEquivalent==0, got nil")
+	}
+	if !strings.HasPrefix(err.Error(), "invalid position") {
+		t.Fatalf("error %q lacks 'invalid position' prefix", err.Error())
+	}
+	if !strings.Contains(err.Error(), "le") || !strings.Contains(err.Error(), "K_equivalent") {
+		t.Fatalf("error %q should point at slot 'le' and field 'K_equivalent'", err.Error())
+	}
+}
+
 // Empty Legs is NOT a validation error — Item 2.4 of the plan requires this
 // to fall through to no-match and be bucketed as NO_RULE by recon. If a
 // future change makes empty legs a validation error, recon's NO_RULE bucket
