@@ -1,7 +1,6 @@
 package overlay
 
 import (
-	"errors"
 	"time"
 
 	"margincalc/internal/account"
@@ -9,16 +8,13 @@ import (
 	"github.com/google/cel-go/cel"
 )
 
-// errNotImplemented is the sentinel returned by stubs in this skeleton
-// PR. Subsequent issues replace it with real behavior; tests assert on
-// this value as a regression target.
-var errNotImplemented = errors.New("overlay: not implemented")
-
 // Engine evaluates an overlay Rulebook against an account snapshot and
-// reference data, producing a HouseRequirement. Behavior is filled in
-// by later issues; this skeleton only declares the type surface, so
-// the struct is empty for now.
-type Engine struct{}
+// reference data, producing a HouseRequirement. A nil Rulebook makes
+// Evaluate a passthrough that emits the baseline numbers and no
+// components.
+type Engine struct {
+	Rulebook *Rulebook
+}
 
 // Rulebook is the compiled, in-memory representation of the overlay
 // rule set. Loaded from one or more YAML files via LoadRulebook. Safe
@@ -80,18 +76,6 @@ type AppliesSpec struct {
 	InstrumentKinds []string `yaml:"instrument_kinds,omitempty"`
 	Sides           []string `yaml:"sides,omitempty"`
 	Currencies      []string `yaml:"currencies,omitempty"`
-}
-
-// Evaluate runs every overlay rule against the snapshot and returns the
-// attributed HouseRequirement. It must not mutate acct or snap. In this
-// skeleton it returns a zero HouseRequirement and the not-implemented
-// sentinel so callers can wire against the API now.
-func (e *Engine) Evaluate(
-	acct account.Account,
-	snap account.AccountSnapshot,
-	ref ReferenceData,
-) (HouseRequirement, error) {
-	return HouseRequirement{}, errNotImplemented
 }
 
 // HouseRequirement is the customer-facing house number with full
