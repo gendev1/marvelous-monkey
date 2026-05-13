@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/google/cel-go/cel"
@@ -105,21 +106,41 @@ func LoadRulebook(path string) (*Rulebook, error) {
 	// Pre-compile every formula and constraint for fail-fast + cache.
 	for _, r := range raw.Rules {
 		for _, c := range r.Match.Constraints {
-			if _, err := rb.compile(r.ID+"/c:"+c, c); err != nil {
-				return nil, fmt.Errorf("rule %s constraint %q: %w", r.ID, c, err)
+			if _, err := rb.compile(r.ID+"/c:"+c, c, kindConstraint); err != nil {
+				return nil, fmt.Errorf("invalid rulebook: rule %s constraint %q: %w", r.ID, c, err)
 			}
 		}
-		for label, expr := range formulaExprs(r) {
+		// Sort labels so error wrapping is deterministic when multiple
+		// formulas would fail — Go map iteration is randomized.
+		exprs := formulaExprs(r)
+		labels := make([]string, 0, len(exprs))
+		for label := range exprs {
+			labels = append(labels, label)
+		}
+		sort.Strings(labels)
+		for _, label := range labels {
+			expr := exprs[label]
 			if expr == "" {
 				continue
 			}
-			if _, err := rb.compile(r.ID+"/"+label, expr); err != nil {
-				return nil, fmt.Errorf("rule %s formula %s: %w", r.ID, label, err)
+			if _, err := rb.compile(r.ID+"/"+label, expr, kindFormula); err != nil {
+				return nil, fmt.Errorf("invalid rulebook: rule %s formula %s: %w", r.ID, label, err)
 			}
 		}
 	}
 	return rb, nil
 }
+
+// exprKind distinguishes formula expressions (must return a number) from
+// constraint expressions (must return a bool — enforced in a sibling issue).
+// The discriminator is plumbed through compile() so the load-time type
+// assertions stay co-located with env.Compile.
+type exprKind int
+
+const (
+	kindFormula exprKind = iota
+	kindConstraint
+)
 
 func formulaExprs(r Rule) map[string]string {
 	return map[string]string{
@@ -134,13 +155,25 @@ func formulaExprs(r Rule) map[string]string {
 	}
 }
 
-func (rb *Rulebook) compile(key, expr string) (cel.Program, error) {
+func (rb *Rulebook) compile(key, expr string, kind exprKind) (cel.Program, error) {
 	if prog, ok := rb.progs[key]; ok {
 		return prog, nil
 	}
 	ast, iss := rb.env.Compile(expr)
 	if iss.Err() != nil {
 		return nil, iss.Err()
+	}
+	if kind == kindFormula {
+		// Accept Double, Int, and DynType: conditional formulas whose branches
+		// both return Double can still be reported as DynType by cel-go's
+		// checker (see long_box_spread margin.initial). The eval-time
+		// celNumber guard stays as defense-in-depth for DynType slip-through.
+		outType := ast.OutputType()
+		if !outType.IsExactType(cel.DoubleType) &&
+			!outType.IsExactType(cel.IntType) &&
+			!outType.IsExactType(cel.DynType) {
+			return nil, fmt.Errorf("formula must return a number, got %s", outType)
+		}
 	}
 	prog, err := rb.env.Program(ast)
 	if err != nil {
@@ -614,7 +647,7 @@ func (rb *Rulebook) evaluateOne(pos Position, rule Rule, accountType AccountType
 	// Constraints. A clean `false` demotes to "doesn't match"; a CEL eval
 	// error is surfaced (likely a rule bug).
 	for _, c := range rule.Match.Constraints {
-		prog, err := rb.compile(rule.ID+"/c:"+c, c)
+		prog, err := rb.compile(rule.ID+"/c:"+c, c, kindConstraint)
 		if err != nil {
 			return Result{}, false, fmt.Errorf("compile constraint %s %q: %w", rule.ID, c, err)
 		}
@@ -668,7 +701,7 @@ func (rb *Rulebook) evaluateOne(pos Position, rule Rule, accountType AccountType
 		return Result{}, false, fmt.Errorf("rule %s has no %s formula", rule.ID, formulaKey)
 	}
 
-	prog, err := rb.compile(rule.ID+"/"+formulaKey, expr)
+	prog, err := rb.compile(rule.ID+"/"+formulaKey, expr, kindFormula)
 	if err != nil {
 		return Result{}, false, fmt.Errorf("compile %s: %w", rule.ID, err)
 	}
@@ -683,7 +716,7 @@ func (rb *Rulebook) evaluateOne(pos Position, rule Rule, accountType AccountType
 
 	var proceeds float64
 	if proceedsExpr != "" {
-		pprog, err := rb.compile(rule.ID+"/"+proceedsKey, proceedsExpr)
+		pprog, err := rb.compile(rule.ID+"/"+proceedsKey, proceedsExpr, kindFormula)
 		if err != nil {
 			return Result{}, false, fmt.Errorf("compile %s %s: %w", rule.ID, proceedsKey, err)
 		}
