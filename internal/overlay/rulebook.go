@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -12,6 +14,12 @@ import (
 	"github.com/google/cel-go/cel"
 	"gopkg.in/yaml.v3"
 )
+
+// supportedSchemaVersion is the only overlay YAML schema version this
+// loader accepts. Bumping the schema means writing a migrator (or
+// versioned loader); silently accepting a future version would let
+// shape changes slip past validation.
+const supportedSchemaVersion = "1"
 
 // rawRulebook mirrors the YAML schema for an overlay rule file. One
 // instance per input file is decoded; LoadRulebook merges constants
@@ -84,10 +92,13 @@ func LoadRulebook(paths ...string) (*Rulebook, error) {
 		var raw rawRulebook
 		if err := dec.Decode(&raw); err != nil {
 			// io.EOF on empty file is fine — treat as no contribution.
-			if err.Error() == "EOF" {
+			if errors.Is(err, io.EOF) {
 				continue
 			}
 			return nil, fmt.Errorf("invalid overlay rulebook: parse %s: %w", path, err)
+		}
+		if raw.SchemaVersion != supportedSchemaVersion {
+			return nil, fmt.Errorf("invalid overlay rulebook: %s schema_version %q is unsupported (want %q)", path, raw.SchemaVersion, supportedSchemaVersion)
 		}
 
 		for k, v := range raw.Constants {

@@ -109,6 +109,8 @@ func validateRawRule(path string, idx int, r rawRule) error {
 		if _, ok := validGroupBy[r.GroupBy]; !ok {
 			return fmt.Errorf("invalid overlay rulebook: rule %q group_by %q is not one of underlying/symbol", r.ID, r.GroupBy)
 		}
+	} else if r.GroupBy != "" {
+		return fmt.Errorf("invalid overlay rulebook: rule %q has group_by but scope is %q (expected group)", r.ID, r.Scope)
 	}
 	// Mode "block" doesn't need a numeric formula — its purpose is the
 	// violation record. Every other mode does: a "max" or "add" with

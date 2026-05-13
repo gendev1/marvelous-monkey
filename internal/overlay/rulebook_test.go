@@ -337,6 +337,24 @@ rules:
 	}
 }
 
+func TestLoad_UnsupportedSchemaVersion_Rejected(t *testing.T) {
+	p := writeTemp(t, "x.yaml", `schema_version: "2"
+rules:
+  - {id: r1, scope: account, mode: add, formula: "1.0"}
+`)
+	_, err := LoadRulebook(p)
+	assertLoaderError(t, err, "schema_version")
+}
+
+func TestLoad_GroupByOnNonGroupScope_Rejected(t *testing.T) {
+	p := writeTemp(t, "x.yaml", `schema_version: "1"
+rules:
+  - {id: r1, scope: account, group_by: symbol, mode: add, formula: "1.0"}
+`)
+	_, err := LoadRulebook(p)
+	assertLoaderError(t, err, "group_by")
+}
+
 func assertLoaderError(t *testing.T, err error, substr string) {
 	t.Helper()
 	if err == nil {
