@@ -690,21 +690,6 @@ func hasAnyOutput(r Rule) bool {
 // note for the rejected migration to CEL constraints.
 func validateRuleInputs(ruleID string, bound map[string]Leg) error {
 	switch ruleID {
-	case "long_option_short_dated", "long_option_long_dated_listed", "long_option_long_dated_otc":
-		return requirePositive(ruleID, "opt", "time_to_expiration_months", bound["opt"].TimeToExpirationMonths)
-	case "short_strangle_or_straddle":
-		return requireSameUnderlying(ruleID, bound, "sp", "sc")
-	case "vertical_spread":
-		if err := requireSameUnderlying(ruleID, bound, "long_leg", "short_leg"); err != nil {
-			return err
-		}
-		if err := requireSameStringField(ruleID, bound, "style", "long_leg", "short_leg"); err != nil {
-			return err
-		}
-		if err := requireSameStringField(ruleID, bound, "venue", "long_leg", "short_leg"); err != nil {
-			return err
-		}
-		return requireExpirationSlots(ruleID, bound, "long_leg", "short_leg")
 	case "long_box_spread":
 		if err := requireExpirationSlots(ruleID, bound, "bc", "bp", "sp", "sc"); err != nil {
 			return err
@@ -727,34 +712,6 @@ func validateRuleInputs(ruleID string, bound map[string]Leg) error {
 			return err
 		}
 		return requireSameContractSize(ruleID, bound, "bc", "bp", "sp", "sc")
-	case "short_put_short_stock":
-		return requirePositive(ruleID, "ss", "short_sale_proceeds", bound["ss"].ShortSaleProceeds)
-	case "short_index_call_long_etf":
-		if err := requireNonEmpty(ruleID, "sc", "underlying", bound["sc"].Underlying); err != nil {
-			return err
-		}
-		if err := requireNonEmpty(ruleID, "le", "tracks_index", bound["le"].TracksIndex); err != nil {
-			return err
-		}
-		if err := requirePositive(ruleID, "le", "price", bound["le"].Price); err != nil {
-			return err
-		}
-		return requirePositive(ruleID, "le", "K_equivalent", bound["le"].KEquivalent)
-	case "covered_call":
-		if err := requireSameUnderlying(ruleID, bound, "sc", "ls"); err != nil {
-			return err
-		}
-		if bound["ls"].Shares < bound["sc"].Qty*bound["sc"].Mult {
-			return fmt.Errorf("invalid position: rule %s requires legs.ls.shares >= legs.sc.qty * legs.sc.mult", ruleID)
-		}
-		return nil
-	case "protective_put":
-		return requireNonEmpty(ruleID, "lp", "style", bound["lp"].Style)
-	case "long_call_short_stock":
-		if err := requireNonEmpty(ruleID, "lc", "style", bound["lc"].Style); err != nil {
-			return err
-		}
-		return requirePositive(ruleID, "ss", "short_sale_proceeds", bound["ss"].ShortSaleProceeds)
 	case "conversion":
 		if err := requireSameUnderlying(ruleID, bound, "lp", "sc"); err != nil {
 			return err

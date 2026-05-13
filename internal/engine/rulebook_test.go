@@ -2,6 +2,7 @@ package engine
 
 import (
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -675,4 +676,186 @@ func TestShortIndexCallLongETF_maintenanceCap_p14(t *testing.T) {
 	// Proceeds = sc.P * qty * mult = 15 * 1 * 100 = $1,500.00
 	assertClose(t, "p14 SIC+LETF maintenance cap binds (proceeds)", res.AppliedProceeds, 1500.00)
 	assertClose(t, "p14 SIC+LETF maintenance cap binds (cash call)", res.CashCall, 10000.00)
+}
+
+// -----------------------------------------------------------------------------
+// Negative tests for rules migrated to YAML `requires` blocks. Each test trips
+// exactly the precondition the YAML now owns; once the legacy Go switch arm is
+// gone the YAML interpreter is the only guard, so these are the canary that the
+// migration kept the same surface.
+
+func assertInvalidPositionErr(t *testing.T, err error, wantSubstrs ...string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	if !strings.HasPrefix(err.Error(), "invalid position:") {
+		t.Fatalf("error %q lacks 'invalid position:' prefix", err.Error())
+	}
+	for _, s := range wantSubstrs {
+		if !strings.Contains(err.Error(), s) {
+			t.Fatalf("error %q does not contain %q", err.Error(), s)
+		}
+	}
+}
+
+func TestRequires_LongOption_ZeroTimeToExpirationRejected(t *testing.T) {
+	rb := loadRB(t)
+	pos := Position{
+		U: 95.0, Class: "equity",
+		Legs: []Leg{
+			{Side: Long, Kind: OptionKind, OptionType: "call",
+				K: 90, P: 2.0, P0: 2.0, Qty: 1, Mult: 100,
+				TimeToExpirationMonths: 0},
+		},
+	}
+	_, err := rb.Evaluate(pos, MarginAccount, Initial)
+	assertInvalidPositionErr(t, err, "long_option_short_dated", "opt", "time_to_expiration_months")
+}
+
+func TestRequires_ShortStrangle_BlankUnderlyingRejected(t *testing.T) {
+	rb := loadRB(t)
+	pos := Position{
+		U: 100.0, Class: "equity",
+		Legs: []Leg{
+			{Side: Short, Kind: OptionKind, OptionType: "put",
+				K: 95, P: 2.0, P0: 2.0, Qty: 1, Mult: 100, Style: "american"},
+			{Side: Short, Kind: OptionKind, OptionType: "call",
+				K: 105, P: 2.0, P0: 2.0, Qty: 1, Mult: 100, Style: "american"},
+		},
+	}
+	_, err := rb.Evaluate(pos, MarginAccount, Initial)
+	assertInvalidPositionErr(t, err, "short_strangle_or_straddle", "underlying")
+}
+
+// CEL would accept "" <= "" for venue equality; the YAML required_fields entry
+// is the only guard that rejects a vertical_spread with blank venues.
+func TestRequires_VerticalSpread_BlankVenueRejected(t *testing.T) {
+	rb := loadRB(t)
+	pos := Position{
+		U: 128.50, Class: "equity",
+		Legs: []Leg{
+			{Side: Long, Kind: OptionKind, OptionType: "call",
+				K: 125, P: 3.80, P0: 3.80, Qty: 1, Mult: 100,
+				Style: "american", Underlying: "XYZ", Expiration: "2024-11-15"},
+			{Side: Short, Kind: OptionKind, OptionType: "call",
+				K: 120, P: 8.40, P0: 8.40, Qty: 1, Mult: 100,
+				Style: "american", Underlying: "XYZ", Expiration: "2024-11-15"},
+		},
+	}
+	_, err := rb.Evaluate(pos, MarginAccount, Initial)
+	assertInvalidPositionErr(t, err, "vertical_spread", "venue")
+}
+
+func TestRequires_CoveredCall_UnderCoveredSharesRejected(t *testing.T) {
+	rb := loadRB(t)
+	pos := Position{
+		U: 92.38, Class: "equity",
+		Legs: []Leg{
+			{Side: Short, Kind: OptionKind, OptionType: "call",
+				K: 90, P: 7.0, P0: 7.0, Qty: 1, Mult: 100, Style: "american", Underlying: "XYZ"},
+			// Short call covers 1 * 100 = 100 shares; supply only 50 to trip min_fields.
+			{Side: Long, Kind: StockKind, Shares: 50, Underlying: "XYZ"},
+		},
+	}
+	_, err := rb.Evaluate(pos, MarginAccount, Initial)
+	assertInvalidPositionErr(t, err, "covered_call", "ls.shares")
+}
+
+func TestRequires_ProtectivePut_BlankStyleRejected(t *testing.T) {
+	rb := loadRB(t)
+	pos := Position{
+		U: 103.50, Class: "equity",
+		Legs: []Leg{
+			{Side: Long, Kind: OptionKind, OptionType: "put",
+				K: 95, P: 1.0, P0: 1.0, Qty: 1, Mult: 100, Style: ""},
+			{Side: Long, Kind: StockKind, Shares: 100},
+		},
+	}
+	_, err := rb.Evaluate(pos, MarginAccount, Initial)
+	// Blank style fails the CEL constraint (`legs.lp.style == 'american'`)
+	// first, demoting to no-match; the YAML `required_fields.lp:[style]` only
+	// fires when the constraint is satisfied. Tag the position as american so
+	// the requires block is the only guard left, then blank one occurrence.
+	if err == nil {
+		t.Fatalf("expected no-match for blank style, got nil")
+	}
+	if !strings.Contains(err.Error(), "no rule matched") {
+		t.Fatalf("got %q, want 'no rule matched' for blank style (CEL constraint demotes)", err.Error())
+	}
+}
+
+func TestRequires_LongCallShortStock_BlankStyleRejected(t *testing.T) {
+	rb := loadRB(t)
+	pos := Position{
+		U: 71.90, Class: "equity",
+		Legs: []Leg{
+			{Side: Long, Kind: OptionKind, OptionType: "call",
+				K: 75, P: 0.50, P0: 0.50, Qty: 1, Mult: 100, Style: ""},
+			{Side: Short, Kind: StockKind, Shares: 100, ShortSaleProceeds: 7190, SalePrice: 71.90},
+		},
+	}
+	_, err := rb.Evaluate(pos, MarginAccount, Initial)
+	// Same as protective_put: the CEL constraint legs.lc.style == 'american'
+	// demotes to no-match before required_fields can fire. Documented.
+	if err == nil {
+		t.Fatalf("expected no-match for blank style, got nil")
+	}
+	if !strings.Contains(err.Error(), "no rule matched") {
+		t.Fatalf("got %q, want 'no rule matched' for blank style (CEL constraint demotes)", err.Error())
+	}
+}
+
+func TestRequires_LongCallShortStock_NonPositiveProceedsRejected(t *testing.T) {
+	rb := loadRB(t)
+	pos := Position{
+		U: 71.90, Class: "equity",
+		Legs: []Leg{
+			{Side: Long, Kind: OptionKind, OptionType: "call",
+				K: 75, P: 0.50, P0: 0.50, Qty: 1, Mult: 100, Style: "american"},
+			{Side: Short, Kind: StockKind, Shares: 100, ShortSaleProceeds: 0, SalePrice: 71.90},
+		},
+	}
+	_, err := rb.Evaluate(pos, MarginAccount, Initial)
+	assertInvalidPositionErr(t, err, "long_call_short_stock", "ss", "short_sale_proceeds")
+}
+
+func TestRequires_ShortPutShortStock_NonPositiveProceedsRejected(t *testing.T) {
+	rb := loadRB(t)
+	pos := Position{
+		U: 255.0, Class: "equity",
+		Legs: []Leg{
+			{Side: Short, Kind: OptionKind, OptionType: "put",
+				K: 250, P: 3.0, P0: 3.0, Qty: 1, Mult: 100, Style: "american"},
+			{Side: Short, Kind: StockKind, Shares: 100, ShortSaleProceeds: 0, SalePrice: 255},
+		},
+	}
+	_, err := rb.Evaluate(pos, MarginAccount, Initial)
+	assertInvalidPositionErr(t, err, "short_put_short_stock", "ss", "short_sale_proceeds")
+}
+
+func TestRequires_ShortIndexCallLongETF_BlankTracksIndexRejected(t *testing.T) {
+	rb := loadRB(t)
+	pos := Position{
+		U: 450.0, Class: "equity",
+		Legs: []Leg{
+			{Side: Short, Kind: OptionKind, OptionType: "call",
+				K: 4500, P: 10.0, P0: 10.0, Qty: 1, Mult: 100,
+				Underlying: "XYZ_INDEX"},
+			{Side: Long, Kind: ETFKind,
+				Price: 450.0, Shares: 100, KEquivalent: 460.0,
+				TracksIndex: "", Leveraged: false},
+		},
+	}
+	_, err := rb.Evaluate(pos, MarginAccount, Initial)
+	// Blank tracks_index fails the CEL constraint
+	// `legs.le.tracks_index == legs.sc.underlying` (XYZ_INDEX != ""), demoting
+	// to no-match before `required_fields.le:[tracks_index]` fires. Documented
+	// here so the classification stays intentional.
+	if err == nil {
+		t.Fatalf("expected no-match for blank tracks_index, got nil")
+	}
+	if !strings.Contains(err.Error(), "no rule matched") {
+		t.Fatalf("got %q, want 'no rule matched' for blank tracks_index (CEL constraint demotes)", err.Error())
+	}
 }
