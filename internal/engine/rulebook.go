@@ -660,24 +660,20 @@ func hasAnyOutput(r Rule) bool {
 // "" <= "". These errors are validation failures, not no-match outcomes.
 //
 // Design choice: the rule-shape helpers used here (requireSameStringField,
-// requireExpirationSlots, requireSingleUnderlying) remain in Go rather than
-// migrating to CEL match.constraints. The CEL-typing epic audit walked all
-// checks reachable from this function and classified them as still needed:
-// none are made redundant by a typed Leg. Two structural reasons keep them
-// Go-side:
+// requireExpirationSlots) remain in Go rather than migrating to CEL
+// match.constraints. The CEL-typing epic audit walked all checks reachable
+// from this function and classified them as still needed: none are made
+// redundant by a typed Leg. The structural reason they stay Go-side is
+// blank-string equality — requireSameStringField rejects two legs whose
+// underlying / expiration / venue fields are both "". In CEL,
+// legs.a.underlying == legs.b.underlying is true for two blank strings, so a
+// constraint phrased that way silently passes on under-specified input. The
+// Go check treats blank as a distinct "missing" state, which CEL's
+// value-equality model cannot express without a parallel "is-set" channel.
 //
-//  1. Blank-string equality. requireSameStringField rejects two legs whose
-//     underlying / expiration / venue fields are both "". In CEL,
-//     legs.a.underlying == legs.b.underlying is true for two blank strings, so
-//     a constraint phrased that way silently passes on under-specified input.
-//     The Go check treats blank as a distinct "missing" state, which CEL's
-//     value-equality model cannot express without a parallel "is-set" channel.
-//
-//  2. Cross-leg uniqueness on all_options patterns. requireSingleUnderlying
-//     runs against generic_limited_risk_combo, whose legs_pattern: all_options
-//     binds an arbitrary number of legs. CEL constraints address slots by name
-//     (legs.a, legs.b, ...), so a constraint cannot iterate the bound set to
-//     assert "every leg shares one underlying".
+// Cross-leg uniqueness on all_options patterns (where the bound set has
+// unbounded size and named-slot CEL cannot iterate it) is handled separately
+// by validateRequirements via the YAML `requires.all_slots` block.
 //
 // requireExpirationSlots stays Go-side for a related but narrower reason: it
 // validates that expiration fields are present and parseable dates before CEL
@@ -742,8 +738,6 @@ func validateRuleInputs(ruleID string, bound map[string]Leg) error {
 			return err
 		}
 		return requireSameStringField(ruleID, bound, "style", "lp", "sc")
-	case "generic_limited_risk_combo":
-		return requireSingleUnderlying(ruleID, bound)
 	default:
 		return nil
 	}
@@ -814,23 +808,6 @@ func requireSameStringField(ruleID string, bound map[string]Leg, field string, s
 		}
 		if value != want {
 			return fmt.Errorf("invalid position: rule %s requires matching %s across slots %v, got %q and %q", ruleID, field, slots, want, value)
-		}
-	}
-	return nil
-}
-
-func requireSingleUnderlying(ruleID string, bound map[string]Leg) error {
-	var want string
-	for slot, leg := range bound {
-		if leg.Underlying == "" {
-			return fmt.Errorf("invalid position: rule %s requires legs.%s.underlying", ruleID, slot)
-		}
-		if want == "" {
-			want = leg.Underlying
-			continue
-		}
-		if leg.Underlying != want {
-			return fmt.Errorf("invalid position: rule %s requires one underlying for mpl(legs), got %q and %q", ruleID, want, leg.Underlying)
 		}
 	}
 	return nil
