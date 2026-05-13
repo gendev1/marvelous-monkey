@@ -61,6 +61,8 @@ func (e *Engine) Evaluate(
 	for _, p := range acct.Positions {
 		posByID[p.ID] = p
 	}
+	// account.* is immutable for the Evaluate call; build it once.
+	acctAct := accountActivation(acct, snap)
 
 	entries := make([]positionEntry, 0, len(snap.Evaluations))
 	for _, eval := range snap.Evaluations {
@@ -103,7 +105,7 @@ func (e *Engine) Evaluate(
 				continue
 			}
 			activation := map[string]any{
-				"account":   accountActivation(acct, snap),
+				"account":   acctAct,
 				"position":  entry.facts.activation(),
 				"security":  securityActivation(entry.sec),
 				"constants": rb.constants,
@@ -184,7 +186,7 @@ func (e *Engine) Evaluate(
 		for _, k := range keys {
 			g := buckets[k]
 			activation := map[string]any{
-				"account":   accountActivation(acct, snap),
+				"account":   acctAct,
 				"position":  map[string]any{},
 				"security":  map[string]any{},
 				"group":     g.activation(),
