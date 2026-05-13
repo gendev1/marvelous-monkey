@@ -2,6 +2,7 @@ package account
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"reflect"
 	"strings"
@@ -9,6 +10,13 @@ import (
 
 	"margincalc/internal/engine"
 )
+
+func assertClose(t *testing.T, label string, got, want float64) {
+	t.Helper()
+	if math.Abs(got-want) > 0.01 {
+		t.Errorf("%s: got %.4f, want %.4f", label, got, want)
+	}
+}
 
 func longStockPosition() AccountPosition {
 	return AccountPosition{
@@ -735,5 +743,302 @@ func TestAggregate_rejectsDuplicateEvalIDs(t *testing.T) {
 	}
 	if !strings.HasPrefix(err.Error(), "invalid account:") {
 		t.Fatalf("expected invalid-account prefix, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AggregateWithRulebook + classifyEvaluation
+// ---------------------------------------------------------------------------
+
+// rbCache mirrors the cache pattern in internal/engine/rulebook_test.go so
+// the YAML is parsed/compiled once across all account-package tests.
+var rbCache *engine.Rulebook
+
+func loadRulebook(t *testing.T) *engine.Rulebook {
+	t.Helper()
+	if rbCache != nil {
+		return rbCache
+	}
+	x, err := engine.LoadRulebook("../../rules/cboe_baseline.yaml")
+	if err != nil {
+		t.Fatalf("LoadRulebook: %v", err)
+	}
+	rbCache = x
+	return rbCache
+}
+
+func TestClassifyEvaluation_permitted(t *testing.T) {
+	res := engine.Result{Permitted: true, Requirement: 1000}
+	got := classifyEvaluation("p1", res, nil)
+	if got.Violation || got.NoRule || got.Error != nil {
+		t.Fatalf("expected clean permitted, got %+v", got)
+	}
+	if got.Result.Requirement != 1000 {
+		t.Fatalf("Result not carried through, got %+v", got.Result)
+	}
+	if got.PositionID != "p1" {
+		t.Fatalf("PositionID lost, got %q", got.PositionID)
+	}
+}
+
+func TestClassifyEvaluation_notPermittedIsViolation(t *testing.T) {
+	res := engine.Result{Permitted: false, RuleID: "house_block"}
+	got := classifyEvaluation("p2", res, nil)
+	if !got.Violation {
+		t.Fatalf("expected Violation=true, got %+v", got)
+	}
+	if got.NoRule || got.Error != nil {
+		t.Fatalf("expected NoRule=false, Error=nil; got %+v", got)
+	}
+	if got.PositionID != "p2" {
+		t.Fatalf("PositionID lost, got %q", got.PositionID)
+	}
+}
+
+func TestClassifyEvaluation_noRuleIsCaptured(t *testing.T) {
+	err := fmt.Errorf("no rule matched position with 2 legs")
+	got := classifyEvaluation("p3", engine.Result{}, err)
+	if !got.NoRule {
+		t.Fatalf("expected NoRule=true, got %+v", got)
+	}
+	if got.Error != nil {
+		t.Fatalf("expected Error=nil, got %v", got.Error)
+	}
+	if got.Result != (engine.Result{}) {
+		t.Fatalf("expected zero Result, got %+v", got.Result)
+	}
+	if got.PositionID != "p3" {
+		t.Fatalf("PositionID lost, got %q", got.PositionID)
+	}
+}
+
+func TestClassifyEvaluation_validationErrorIsError(t *testing.T) {
+	err := fmt.Errorf("invalid position: leg 0 K must be > 0, got 0")
+	got := classifyEvaluation("p4", engine.Result{}, err)
+	if got.Error == nil {
+		t.Fatalf("expected Error set, got %+v", got)
+	}
+	if got.NoRule {
+		t.Fatalf("validation error must not flag NoRule, got %+v", got)
+	}
+	if got.PositionID != "p4" {
+		t.Fatalf("PositionID lost, got %q", got.PositionID)
+	}
+}
+
+func TestClassifyEvaluation_otherErrorIsError(t *testing.T) {
+	err := fmt.Errorf("unexpected CEL failure: divide by zero")
+	got := classifyEvaluation("p5", engine.Result{}, err)
+	if got.Error == nil {
+		t.Fatalf("expected Error set, got %+v", got)
+	}
+	if got.NoRule {
+		t.Fatalf("non-no-match error must not flag NoRule, got %+v", got)
+	}
+	if got.PositionID != "p5" {
+		t.Fatalf("PositionID lost, got %q", got.PositionID)
+	}
+}
+
+func longStockOnlyPosition() AccountPosition {
+	return AccountPosition{
+		ID: "stock-only",
+		Position: engine.Position{
+			U:     100,
+			Class: "equity",
+			Legs: []engine.Leg{{
+				Side:   engine.Long,
+				Kind:   engine.StockKind,
+				Shares: 100,
+			}},
+		},
+	}
+}
+
+func shortPutOTMPosition() AccountPosition {
+	return AccountPosition{
+		ID: "short-put",
+		Position: engine.Position{
+			U:     95.0,
+			Class: "equity",
+			Legs: []engine.Leg{{
+				Side: engine.Short, Kind: engine.OptionKind, OptionType: "put",
+				K: 80, P: 2.0, P0: 2.0, Qty: 1, Mult: 100,
+			}},
+		},
+	}
+}
+
+func verticalCallSpreadPosition() AccountPosition {
+	return AccountPosition{
+		ID: "vert-call",
+		Position: engine.Position{
+			U:     128.50,
+			Class: "equity",
+			Legs: []engine.Leg{
+				{Side: engine.Long, Kind: engine.OptionKind, OptionType: "call",
+					K: 125, P: 3.80, P0: 3.80, Qty: 1, Mult: 100,
+					Style: "american", Venue: "listed",
+					Underlying: "XYZ", Expiration: "2024-11-15"},
+				{Side: engine.Short, Kind: engine.OptionKind, OptionType: "call",
+					K: 120, P: 8.40, P0: 8.40, Qty: 1, Mult: 100,
+					Style: "american", Venue: "listed",
+					Underlying: "XYZ", Expiration: "2024-11-15"},
+			},
+		},
+	}
+}
+
+// engineMalformedPosition passes account-level validation (option fields P>=0,
+// Qty>0 satisfied) but fails engine.validateRuleInputs because the rule that
+// binds (long_option_short_dated) requires legs.opt.time_to_expiration_months
+// > 0, which is left at zero here. The resulting error string starts with
+// "invalid position:" and lands in Errors per the classifier contract.
+func engineMalformedPosition() AccountPosition {
+	return AccountPosition{
+		ID: "malformed-long-opt",
+		Position: engine.Position{
+			U:     100,
+			Class: "equity",
+			Legs: []engine.Leg{{
+				Side: engine.Long, Kind: engine.OptionKind, OptionType: "call",
+				K: 100, P: 1.0, P0: 1.0, Qty: 1, Mult: 100,
+				// TimeToExpirationMonths intentionally 0
+			}},
+		},
+	}
+}
+
+func TestAggregateWithRulebook_marginAccountMixedPositions(t *testing.T) {
+	rb := loadRulebook(t)
+	a := Account{
+		ID:          "acct-mixed",
+		AccountType: engine.MarginAccount,
+		Phase:       engine.Initial,
+		SODEquity:   100000,
+		CashBalance: 100000,
+		Positions: []AccountPosition{
+			longStockOnlyPosition(),
+			shortPutOTMPosition(),
+			verticalCallSpreadPosition(),
+			engineMalformedPosition(),
+		},
+	}
+
+	snap, err := AggregateWithRulebook(rb, a)
+	if err != nil {
+		t.Fatalf("AggregateWithRulebook: %v", err)
+	}
+
+	if len(snap.Evaluations) != 4 {
+		t.Fatalf("Evaluations want 4 entries in declaration order, got %d", len(snap.Evaluations))
+	}
+	wantIDs := []string{"stock-only", "short-put", "vert-call", "malformed-long-opt"}
+	for i, w := range wantIDs {
+		if snap.Evaluations[i].PositionID != w {
+			t.Fatalf("Evaluations[%d].PositionID want %q, got %q", i, w, snap.Evaluations[i].PositionID)
+		}
+	}
+	if !snap.Evaluations[0].NoRule {
+		t.Fatalf("stock-only must classify as NoRule, got %+v", snap.Evaluations[0])
+	}
+	if snap.Evaluations[1].Error != nil || snap.Evaluations[1].NoRule || snap.Evaluations[1].Violation {
+		t.Fatalf("short-put must be a clean permitted evaluation, got %+v", snap.Evaluations[1])
+	}
+	if snap.Evaluations[2].Error != nil || snap.Evaluations[2].NoRule || snap.Evaluations[2].Violation {
+		t.Fatalf("vert-call must be a clean permitted evaluation, got %+v", snap.Evaluations[2])
+	}
+	if snap.Evaluations[3].Error == nil {
+		t.Fatalf("malformed-long-opt must carry an Error, got %+v", snap.Evaluations[3])
+	}
+
+	if len(snap.Errors) != 1 || snap.Errors[0].PositionID != "malformed-long-opt" {
+		t.Fatalf("Errors want exactly malformed-long-opt, got %+v", snap.Errors)
+	}
+	if !strings.HasPrefix(snap.Errors[0].Error.Error(), "invalid position:") {
+		t.Fatalf("Error message should be an engine validation error, got %v", snap.Errors[0].Error)
+	}
+	if len(snap.Violations) != 0 {
+		t.Fatalf("Violations should be empty, got %+v", snap.Violations)
+	}
+
+	// Manual numbers from existing engine tests (TestShortPutOTM_p28,
+	// TestVerticalCallSpread_p42). Positions 1 and 4 contribute zero
+	// requirement; position 4 still contributes MV because account-level
+	// validation passed (partial-output preservation).
+	assertClose(t, "TotalRequirement", snap.TotalRequirement, 1000+880)
+	assertClose(t, "TotalCashCall", snap.TotalCashCall, 800+40)
+
+	// MV buckets:
+	//   stock-only:   long stock 100 shares @ U=100  → LMVStock += 10000
+	//   short-put:    short put P=2 qty=1 mult=100   → SMVOption += 200
+	//   vert-call:    long  call P=3.80              → LMVOption += 380
+	//                 short call P=8.40              → SMVOption += 840
+	//   malformed:    long  call P=1 qty=1 mult=100  → LMVOption += 100
+	assertClose(t, "LMVStock", snap.LMVStock, 10000)
+	assertClose(t, "LMVOption", snap.LMVOption, 380+100)
+	assertClose(t, "SMVOption", snap.SMVOption, 200+840)
+	assertClose(t, "SMVStock", snap.SMVStock, 0)
+}
+
+func TestAggregateWithRulebook_errorDoesNotShortCircuit(t *testing.T) {
+	rb := loadRulebook(t)
+	a := Account{
+		ID:          "acct-partial",
+		AccountType: engine.MarginAccount,
+		Phase:       engine.Initial,
+		SODEquity:   50000,
+		Positions: []AccountPosition{
+			shortPutOTMPosition(),
+			engineMalformedPosition(),
+		},
+	}
+
+	snap, err := AggregateWithRulebook(rb, a)
+	if err != nil {
+		t.Fatalf("AggregateWithRulebook must not surface per-position errors as function error, got %v", err)
+	}
+	if len(snap.Errors) != 1 || snap.Errors[0].PositionID != "malformed-long-opt" {
+		t.Fatalf("malformed position must land in Errors, got %+v", snap.Errors)
+	}
+	// Permitted position's MV and requirement still appear.
+	assertClose(t, "TotalRequirement", snap.TotalRequirement, 1000)
+	assertClose(t, "TotalCashCall", snap.TotalCashCall, 800)
+	// Both legs contribute MV: the permitted short put (200) and the
+	// erroring long option (100).
+	assertClose(t, "SMVOption", snap.SMVOption, 200)
+	assertClose(t, "LMVOption", snap.LMVOption, 100)
+}
+
+func TestAggregateWithRulebook_nilRulebook(t *testing.T) {
+	a := minimalAccount()
+	snap, err := AggregateWithRulebook(nil, a)
+	if err == nil {
+		t.Fatalf("expected error for nil rulebook")
+	}
+	if !strings.HasPrefix(err.Error(), "invalid account:") {
+		t.Fatalf("expected invalid-account prefix, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "nil rulebook") {
+		t.Fatalf("error should name the nil rulebook, got %v", err)
+	}
+	if snap.AccountID != "" {
+		t.Fatalf("expected empty snapshot, got %+v", snap)
+	}
+}
+
+func TestAggregateWithRulebook_validationFailureReturnsError(t *testing.T) {
+	rb := loadRulebook(t)
+	a := minimalAccount()
+	a.ID = "" // fail validate()
+	snap, err := AggregateWithRulebook(rb, a)
+	if err == nil {
+		t.Fatalf("expected validation error")
+	}
+	if !strings.HasPrefix(err.Error(), "invalid account:") {
+		t.Fatalf("expected invalid-account prefix, got %v", err)
+	}
+	if snap.AccountID != "" || len(snap.Evaluations) != 0 {
+		t.Fatalf("expected empty snapshot, got %+v", snap)
 	}
 }

@@ -1,6 +1,55 @@
 package account
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+
+	"margincalc/internal/engine"
+)
+
+// AggregateWithRulebook evaluates each position in account against rb,
+// classifies the engine return into Evaluations / Violations / Errors
+// (with NoRule distinguished via the "no rule matched" substring contract
+// the engine emits at internal/engine/rulebook.go's Evaluate), and reduces
+// to Aggregate. Per-position errors do not short-circuit aggregation:
+// market-value buckets are still accumulated for every leg that passes
+// account-level validation, and the per-position error lands in Errors.
+func AggregateWithRulebook(rb *engine.Rulebook, account Account) (AccountSnapshot, error) {
+	if rb == nil {
+		return AccountSnapshot{}, fmt.Errorf("invalid account: nil rulebook")
+	}
+	if err := validate(account); err != nil {
+		return AccountSnapshot{}, err
+	}
+	evals := make([]PositionEvaluation, 0, len(account.Positions))
+	for _, pos := range account.Positions {
+		result, err := rb.Evaluate(pos.Position, account.AccountType, account.Phase)
+		evals = append(evals, classifyEvaluation(pos.ID, result, err))
+	}
+	return Aggregate(account, evals)
+}
+
+// classifyEvaluation converts the engine's (Result, error) return into a
+// PositionEvaluation with the correct flags. Only the "no rule matched"
+// substring is special-cased into NoRule; every other error (validation
+// failures prefixed "invalid position:", CEL eval failures, etc.) lands
+// in Error. The classifier reads only the error string — it does not
+// type-assert or unwrap. The engine's own assertion at
+// internal/engine/rulebook_test.go is the firewall against a future
+// rewording of the no-match message.
+func classifyEvaluation(positionID string, result engine.Result, err error) PositionEvaluation {
+	if err == nil {
+		return PositionEvaluation{
+			PositionID: positionID,
+			Result:     result,
+			Violation:  !result.Permitted,
+		}
+	}
+	if strings.Contains(err.Error(), "no rule matched") {
+		return PositionEvaluation{PositionID: positionID, NoRule: true}
+	}
+	return PositionEvaluation{PositionID: positionID, Error: err}
+}
 
 // Aggregate builds an AccountSnapshot from a validated Account and a slice
 // of caller-supplied PositionEvaluation results. It performs no rulebook
