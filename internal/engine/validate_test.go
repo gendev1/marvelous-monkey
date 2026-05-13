@@ -597,12 +597,54 @@ rules:
 	}
 }
 
-// A constraint that returns a non-bool (e.g. `1 + 1`) must NOT be rejected at
-// load in this issue — constraint-bool assertion is the sibling issue's scope.
-// This proves the kind discriminator is wired and not over-eager. The sibling
-// issue will flip this expectation.
-func TestLoadRulebook_nonBoolConstraintNotYetRejected(t *testing.T) {
-	err := loadRulebookFromYAML(t, `
+// A non-bool constraint must be rejected at load time. Today the eval-side
+// out.Value().(bool) silently demotes a non-bool result to ok=false → no-match,
+// which lets typos slip past as "no rule matched" rather than a hard error.
+// Asserting ast.OutputType() at compile catches the mistake at LoadRulebook.
+func TestLoadRulebook_nonBoolConstraintFails(t *testing.T) {
+	t.Run("double", func(t *testing.T) {
+		err := loadRulebookFromYAML(t, `
+schema_version: "1"
+rates:
+  equity: { base_pct: 0.20, min_pct: 0.10 }
+rules:
+  - id: dbl_constraint
+    match:
+      legs:
+        - { name: a, side: long, kind: option }
+      constraints:
+        - "1.0 + 2.0"
+    formulas:
+      margin:
+        initial:     "0.0"
+        maintenance: "0.0"
+`)
+		assertRulebookError(t, err, "constraint must return bool, got double")
+		if !strings.Contains(err.Error(), `constraint "1.0 + 2.0"`) {
+			t.Fatalf("error %q lacks constraint label", err.Error())
+		}
+	})
+	t.Run("string", func(t *testing.T) {
+		err := loadRulebookFromYAML(t, `
+schema_version: "1"
+rates:
+  equity: { base_pct: 0.20, min_pct: 0.10 }
+rules:
+  - id: str_constraint
+    match:
+      legs:
+        - { name: a, side: long, kind: option }
+      constraints:
+        - "'hi'"
+    formulas:
+      margin:
+        initial:     "0.0"
+        maintenance: "0.0"
+`)
+		assertRulebookError(t, err, "constraint must return bool, got string")
+	})
+	t.Run("int", func(t *testing.T) {
+		err := loadRulebookFromYAML(t, `
 schema_version: "1"
 rates:
   equity: { base_pct: 0.20, min_pct: 0.10 }
@@ -613,6 +655,30 @@ rules:
         - { name: a, side: long, kind: option }
       constraints:
         - "1 + 1"
+    formulas:
+      margin:
+        initial:     "0.0"
+        maintenance: "0.0"
+`)
+		assertRulebookError(t, err, "constraint must return bool, got int")
+	})
+}
+
+// A constraint that is the literal `true` (or any bool-typed expression)
+// must continue to load cleanly — the assertion accepts every bool, not just
+// bool-shaped comparisons.
+func TestLoadRulebook_boolConstraintLoads(t *testing.T) {
+	err := loadRulebookFromYAML(t, `
+schema_version: "1"
+rates:
+  equity: { base_pct: 0.20, min_pct: 0.10 }
+rules:
+  - id: bool_constraint
+    match:
+      legs:
+        - { name: a, side: long, kind: option }
+      constraints:
+        - "true"
     formulas:
       margin:
         initial:     "0.0"
