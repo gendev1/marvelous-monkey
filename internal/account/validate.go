@@ -19,8 +19,9 @@ var recognizedKinds = []engine.Kind{
 }
 
 // validate enforces account-level shape and per-leg market-value-input shape.
-// Margin-rule input shape is engine.validateRuleInputs's job
-// (internal/engine/rulebook.go:460) and is intentionally not duplicated here.
+// Margin-rule input shape is the engine's job (validated by RequireSpec via
+// validateRequirements in internal/engine/rulebook.go) and is intentionally
+// not duplicated here.
 //
 // Every error starts with the literal prefix "invalid account:" so callers
 // can string-classify, mirroring the engine's "invalid position:" convention.
@@ -106,7 +107,7 @@ func posLabel(p AccountPosition, idx int) string {
 // Non-finite values are rejected before inequality checks because NaN
 // compares false against any bound and would otherwise slip through.
 // Margin-rule input shape (K, P0, Style, Expiration, etc.) is intentionally
-// left to engine.validateRuleInputs.
+// left to the engine's RequireSpec interpreter.
 func validateLeg(accountID, posLabel string, j int, leg engine.Leg, pos engine.Position) error {
 	switch leg.Side {
 	case engine.Long, engine.Short:

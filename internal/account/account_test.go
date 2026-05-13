@@ -913,10 +913,11 @@ func verticalCallSpreadPosition() AccountPosition {
 }
 
 // engineMalformedPosition passes account-level validation (option fields P>=0,
-// Qty>0 satisfied) but fails engine.validateRuleInputs because the rule that
-// binds (long_option_short_dated) requires legs.opt.time_to_expiration_months
-// > 0, which is left at zero here. The resulting error string starts with
-// "invalid position:" and lands in Errors per the classifier contract.
+// Qty>0 satisfied) but fails the engine's RequireSpec interpreter because the
+// rule that binds (long_option_short_dated) requires
+// legs.opt.time_to_expiration_months > 0, which is left at zero here. The
+// resulting error string starts with "invalid position:" and lands in Errors
+// per the classifier contract.
 func engineMalformedPosition() AccountPosition {
 	return AccountPosition{
 		ID: "malformed-long-opt",
