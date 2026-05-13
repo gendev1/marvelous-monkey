@@ -93,6 +93,16 @@ func posLabel(p AccountPosition, idx int) string {
 	return fmt.Sprintf("position[%d]", idx)
 }
 
+// validateLeg enforces MV-input invariants per kind:
+//   - side ∈ {long, short}; kind ∈ recognizedKinds
+//   - option: finite P >= 0, finite Qty > 0
+//   - stock: finite Shares > 0, finite pos.U > 0
+//   - ETF/ETN/convertible/warrant: finite Price > 0, finite Shares > 0
+//
+// Non-finite values are rejected before inequality checks because NaN
+// compares false against any bound and would otherwise slip through.
+// Margin-rule input shape (K, P0, Style, Expiration, etc.) is intentionally
+// left to engine.validateRuleInputs.
 func validateLeg(accountID, posLabel string, j int, leg engine.Leg, pos engine.Position) error {
 	switch leg.Side {
 	case engine.Long, engine.Short:
