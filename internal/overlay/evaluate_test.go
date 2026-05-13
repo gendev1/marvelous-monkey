@@ -3,6 +3,7 @@ package overlay
 import (
 	"math"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -515,6 +516,303 @@ var errFakeEvalErr = &fakeErr{msg: "engine error"}
 type fakeErr struct{ msg string }
 
 func (f *fakeErr) Error() string { return f.msg }
+
+// --- group-scope tests -------------------------------------------------------
+
+// groupAddRulebook fires `group.gross_market_value > 20000` for any
+// bucket and adds 10% of the group's gross MV. Used by the
+// firing-group-only test.
+const groupAddYAML = `schema_version: "1"
+rules:
+  - id: concentration_addon
+    scope: group
+    group_by: underlying
+    mode: add
+    basis: group_gross_mv
+    when: "group.gross_market_value > 20000.0"
+    formula: "group.gross_market_value * 0.10"
+`
+
+func TestEvaluate_GroupAdd_AccumulatesDeltaForFiringGroupOnly(t *testing.T) {
+	rb := loadRules(t, groupAddYAML)
+	// AAPL: 200 * 150 = 30,000 (fires)
+	// MSFT: 100 * 100 = 10,000 (doesn't fire)
+	// GOOG: 50 * 200  = 10,000 (doesn't fire)
+	p1 := stockPosition("p1", "AAPL", engine.Long, 200, 150)
+	p2 := stockPosition("p2", "MSFT", engine.Long, 100, 100)
+	p3 := stockPosition("p3", "GOOG", engine.Long, 50, 200)
+	acct := baseAccount(p1, p2, p3)
+	snap := baseSnapshot(acct, []account.PositionEvaluation{
+		{PositionID: "p1", Result: engine.Result{Requirement: 1000}},
+		{PositionID: "p2", Result: engine.Result{Requirement: 500}},
+		{PositionID: "p3", Result: engine.Result{Requirement: 500}},
+	})
+
+	e := &Engine{Rulebook: rb}
+	out, err := e.Evaluate(acct, snap, ReferenceData{})
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if len(out.Components) != 1 {
+		t.Fatalf("Components = %d, want 1; got %+v", len(out.Components), out.Components)
+	}
+	c := out.Components[0]
+	if c.Scope != "group" || c.GroupKey != "AAPL" || c.Symbol != "AAPL" || c.PositionID != "" {
+		t.Errorf("component identity = %+v", c)
+	}
+	if c.Delta != 3000 || c.OverlayAmount != 3000 || !c.Applied {
+		t.Errorf("Delta/OverlayAmount/Applied = %v/%v/%v", c.Delta, c.OverlayAmount, c.Applied)
+	}
+	want := snap.TotalRequirement + 3000
+	if out.HouseRequirement != want {
+		t.Errorf("HouseRequirement = %v, want %v", out.HouseRequirement, want)
+	}
+}
+
+func TestEvaluate_GroupMax_BaselineIsSumOfPerPositionRequirements_D2(t *testing.T) {
+	rb := loadRules(t, `schema_version: "1"
+rules:
+  - id: group_floor_5k
+    scope: group
+    group_by: underlying
+    mode: max
+    basis: group_gross_mv
+    formula: "5000.0"
+`)
+	// Three AAPL positions; Layer 1 baselines sum to 4000.
+	p1 := stockPosition("p1", "AAPL", engine.Long, 100, 150)
+	p2 := stockPosition("p2", "AAPL", engine.Long, 100, 150)
+	p3 := stockPosition("p3", "AAPL", engine.Long, 100, 150)
+	acct := baseAccount(p1, p2, p3)
+	snap := baseSnapshot(acct, []account.PositionEvaluation{
+		{PositionID: "p1", Result: engine.Result{Requirement: 1500}},
+		{PositionID: "p2", Result: engine.Result{Requirement: 1500}},
+		{PositionID: "p3", Result: engine.Result{Requirement: 1000}},
+	})
+
+	e := &Engine{Rulebook: rb}
+	out, _ := e.Evaluate(acct, snap, ReferenceData{})
+	if len(out.Components) != 1 {
+		t.Fatalf("Components = %d, want 1; got %+v", len(out.Components), out.Components)
+	}
+	c := out.Components[0]
+	if c.BaselineAmount != 4000 || c.OverlayAmount != 5000 || c.Delta != 1000 || !c.Applied {
+		t.Errorf("D2 baseline composition wrong: %+v", c)
+	}
+	// Per-position baselines must be in Evidence for audit.
+	for _, id := range []string{"p1", "p2", "p3"} {
+		if _, ok := c.Evidence["baseline."+id]; !ok {
+			t.Errorf("Evidence missing baseline.%s; have %v", id, c.Evidence)
+		}
+	}
+	if out.HouseRequirement != snap.TotalRequirement+1000 {
+		t.Errorf("HouseRequirement = %v, want %v", out.HouseRequirement, snap.TotalRequirement+1000)
+	}
+}
+
+func TestEvaluate_GroupMax_OverlayBelowBaseline_NoDelta(t *testing.T) {
+	rb := loadRules(t, `schema_version: "1"
+rules:
+  - id: group_floor_3k
+    scope: group
+    group_by: underlying
+    mode: max
+    basis: group_gross_mv
+    formula: "3000.0"
+`)
+	p1 := stockPosition("p1", "AAPL", engine.Long, 100, 150)
+	p2 := stockPosition("p2", "AAPL", engine.Long, 100, 150)
+	p3 := stockPosition("p3", "AAPL", engine.Long, 100, 150)
+	acct := baseAccount(p1, p2, p3)
+	snap := baseSnapshot(acct, []account.PositionEvaluation{
+		{PositionID: "p1", Result: engine.Result{Requirement: 1500}},
+		{PositionID: "p2", Result: engine.Result{Requirement: 1500}},
+		{PositionID: "p3", Result: engine.Result{Requirement: 1000}},
+	})
+
+	e := &Engine{Rulebook: rb}
+	out, _ := e.Evaluate(acct, snap, ReferenceData{})
+	if len(out.Components) != 1 {
+		t.Fatalf("Components = %d", len(out.Components))
+	}
+	c := out.Components[0]
+	if c.Applied || c.Delta != 0 {
+		t.Errorf("expected non-applied component, got %+v", c)
+	}
+	if out.HouseRequirement != snap.TotalRequirement {
+		t.Errorf("HouseRequirement should equal baseline, got %v want %v",
+			out.HouseRequirement, snap.TotalRequirement)
+	}
+}
+
+func TestEvaluate_GroupBy_Underlying_BucketsCorrectly(t *testing.T) {
+	rb := loadRules(t, `schema_version: "1"
+rules:
+  - id: per_underlying_addon
+    scope: group
+    group_by: underlying
+    mode: add
+    formula: "group.position_count * 100.0"
+`)
+	// Two AAPL, one MSFT → two groups, count 2 and 1.
+	p1 := stockPosition("p1", "AAPL", engine.Long, 100, 150)
+	p2 := stockPosition("p2", "AAPL", engine.Long, 50, 150)
+	p3 := stockPosition("p3", "MSFT", engine.Long, 100, 100)
+	acct := baseAccount(p1, p2, p3)
+	snap := baseSnapshot(acct, []account.PositionEvaluation{
+		{PositionID: "p1"},
+		{PositionID: "p2"},
+		{PositionID: "p3"},
+	})
+
+	e := &Engine{Rulebook: rb}
+	out, _ := e.Evaluate(acct, snap, ReferenceData{})
+	if len(out.Components) != 2 {
+		t.Fatalf("Components = %d, want 2; got %+v", len(out.Components), out.Components)
+	}
+	byKey := map[string]HouseComponent{}
+	for _, c := range out.Components {
+		byKey[c.GroupKey] = c
+	}
+	if byKey["AAPL"].Delta != 200 {
+		t.Errorf("AAPL delta = %v, want 200", byKey["AAPL"].Delta)
+	}
+	if byKey["MSFT"].Delta != 100 {
+		t.Errorf("MSFT delta = %v, want 100", byKey["MSFT"].Delta)
+	}
+}
+
+func TestEvaluate_GroupBy_Symbol_BucketsCorrectly(t *testing.T) {
+	rb := loadRules(t, `schema_version: "1"
+rules:
+  - id: per_symbol_addon
+    scope: group
+    group_by: symbol
+    mode: add
+    formula: "group.gross_market_value * 0.01"
+`)
+	p1 := stockPosition("p1", "AAPL", engine.Long, 100, 150) // 15000
+	p2 := stockPosition("p2", "AAPL", engine.Long, 100, 150) // 15000
+	p3 := stockPosition("p3", "MSFT", engine.Long, 100, 100) // 10000
+	acct := baseAccount(p1, p2, p3)
+	snap := baseSnapshot(acct, []account.PositionEvaluation{
+		{PositionID: "p1"}, {PositionID: "p2"}, {PositionID: "p3"},
+	})
+	e := &Engine{Rulebook: rb}
+	out, _ := e.Evaluate(acct, snap, ReferenceData{})
+	if len(out.Components) != 2 {
+		t.Fatalf("Components = %d, want 2", len(out.Components))
+	}
+	byKey := map[string]HouseComponent{}
+	for _, c := range out.Components {
+		byKey[c.GroupKey] = c
+	}
+	if byKey["AAPL"].Delta != 300 {
+		t.Errorf("AAPL = %v, want 300", byKey["AAPL"].Delta)
+	}
+	if byKey["MSFT"].Delta != 100 {
+		t.Errorf("MSFT = %v, want 100", byKey["MSFT"].Delta)
+	}
+}
+
+func TestEvaluate_GroupOrdering_DeterministicAcrossRuns(t *testing.T) {
+	rb := loadRules(t, `schema_version: "1"
+rules:
+  - id: per_underlying_addon
+    scope: group
+    group_by: underlying
+    mode: add
+    formula: "1.0"
+`)
+	// Several positions across many symbols to exercise map iteration.
+	positions := []account.AccountPosition{
+		stockPosition("p1", "ZZZZ", engine.Long, 1, 10),
+		stockPosition("p2", "AAPL", engine.Long, 1, 10),
+		stockPosition("p3", "MSFT", engine.Long, 1, 10),
+		stockPosition("p4", "GOOG", engine.Long, 1, 10),
+		stockPosition("p5", "TSLA", engine.Long, 1, 10),
+		stockPosition("p6", "NVDA", engine.Long, 1, 10),
+		stockPosition("p7", "BBBB", engine.Long, 1, 10),
+	}
+	acct := baseAccount(positions...)
+	evals := make([]account.PositionEvaluation, len(positions))
+	for i, p := range positions {
+		evals[i] = account.PositionEvaluation{PositionID: p.ID}
+	}
+	snap := baseSnapshot(acct, evals)
+	e := &Engine{Rulebook: rb}
+
+	out1, _ := e.Evaluate(acct, snap, ReferenceData{})
+	out2, _ := e.Evaluate(acct, snap, ReferenceData{})
+	if len(out1.Components) != len(positions) {
+		t.Fatalf("got %d components, want %d", len(out1.Components), len(positions))
+	}
+	keys1 := make([]string, len(out1.Components))
+	keys2 := make([]string, len(out2.Components))
+	for i := range out1.Components {
+		keys1[i] = out1.Components[i].GroupKey
+		keys2[i] = out2.Components[i].GroupKey
+	}
+	if !reflect.DeepEqual(keys1, keys2) {
+		t.Errorf("ordering not deterministic:\n run1=%v\n run2=%v", keys1, keys2)
+	}
+	if !sort.StringsAreSorted(keys1) {
+		t.Errorf("group keys not byte-sorted: %v", keys1)
+	}
+}
+
+func TestEvaluate_GroupSkipsWhenAllPositionsFilteredByAppliesMatrix(t *testing.T) {
+	rb := loadRules(t, `schema_version: "1"
+rules:
+  - id: etf_only_group
+    scope: group
+    group_by: underlying
+    mode: add
+    formula: "1.0"
+    applies:
+      instrument_kinds: [etf]
+`)
+	// Stock-only position; ETF filter excludes it from the bucket.
+	p := stockPosition("p1", "AAPL", engine.Long, 100, 150)
+	acct := baseAccount(p)
+	snap := baseSnapshot(acct, []account.PositionEvaluation{{PositionID: "p1"}})
+	e := &Engine{Rulebook: rb}
+	out, _ := e.Evaluate(acct, snap, ReferenceData{})
+	if len(out.Components) != 0 {
+		t.Errorf("expected no components when applies excludes all positions, got %v", out.Components)
+	}
+}
+
+func TestEvaluate_GroupMax_FloorMode_CarriesFloorAttribution(t *testing.T) {
+	rb := loadRules(t, `schema_version: "1"
+rules:
+  - id: group_floor
+    scope: group
+    group_by: underlying
+    mode: floor
+    basis: group_gross_mv
+    formula: "5000.0"
+`)
+	p1 := stockPosition("p1", "AAPL", engine.Long, 100, 150)
+	p2 := stockPosition("p2", "AAPL", engine.Long, 100, 150)
+	acct := baseAccount(p1, p2)
+	snap := baseSnapshot(acct, []account.PositionEvaluation{
+		{PositionID: "p1", Result: engine.Result{Requirement: 1000}},
+		{PositionID: "p2", Result: engine.Result{Requirement: 1000}},
+	})
+	e := &Engine{Rulebook: rb}
+	out, _ := e.Evaluate(acct, snap, ReferenceData{})
+	if len(out.Components) != 1 {
+		t.Fatalf("Components = %d", len(out.Components))
+	}
+	c := out.Components[0]
+	if c.Mode != "floor" {
+		t.Errorf("Mode = %q, want floor", c.Mode)
+	}
+	if c.BaselineAmount != 2000 || c.Delta != 3000 || !c.Applied {
+		t.Errorf("component = %+v", c)
+	}
+}
 
 // --- deep copy helpers -------------------------------------------------------
 

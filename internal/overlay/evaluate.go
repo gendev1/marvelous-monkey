@@ -4,11 +4,25 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"sort"
 
 	"margincalc/internal/account"
 
 	"github.com/google/cel-go/cel"
 )
+
+// positionEntry is the per-position eligibility record computed once
+// per Evaluate call and reused by both the position-scope and
+// group-scope loops. errored or non-stock-like positions never appear
+// here; their exclusion is documented on the type.
+type positionEntry struct {
+	pos    account.AccountPosition
+	facts  positionFacts
+	sec    SecurityFacts
+	secOK  bool
+	side   string
+	baseRq float64
+}
 
 // Evaluate runs the overlay Rulebook against an account snapshot and
 // reference data and returns the attributed HouseRequirement. It does
@@ -47,6 +61,7 @@ func (e *Engine) Evaluate(
 		posByID[p.ID] = p
 	}
 
+	entries := make([]positionEntry, 0, len(snap.Evaluations))
 	for _, eval := range snap.Evaluations {
 		if eval.Error != nil {
 			continue
@@ -65,8 +80,17 @@ func (e *Engine) Evaluate(
 				fmt.Sprintf("reference data missing for %s@%s; defaulted instrument_kind=stock",
 					facts.primarySymbol, facts.primaryVenue))
 		}
+		entries = append(entries, positionEntry{
+			pos:    p,
+			facts:  facts,
+			sec:    sec,
+			secOK:  secOK,
+			side:   sideToken(facts),
+			baseRq: eval.Result.Requirement,
+		})
+	}
 
-		side := sideToken(facts)
+	for _, entry := range entries {
 		for _, rule := range rb.rules {
 			if rule.Scope != "position" {
 				continue
@@ -74,19 +98,19 @@ func (e *Engine) Evaluate(
 			if rule.Mode == "block" {
 				continue
 			}
-			if !appliesMatches(rule.Applies, acct, sec, side) {
+			if !appliesMatches(rule.Applies, acct, entry.sec, entry.side) {
 				continue
 			}
 			activation := map[string]any{
 				"account":   accountActivation(acct, snap),
-				"position":  facts.activation(),
-				"security":  securityActivation(sec),
+				"position":  entry.facts.activation(),
+				"security":  securityActivation(entry.sec),
 				"constants": rb.constants,
 			}
 			matched, err := evalBool(rule.whenProg, activation)
 			if err != nil {
 				out.Warnings = append(out.Warnings,
-					fmt.Sprintf("rule %q when eval error on position %s: %v", rule.ID, p.ID, err))
+					fmt.Sprintf("rule %q when eval error on position %s: %v", rule.ID, entry.pos.ID, err))
 				continue
 			}
 			if !matched {
@@ -95,10 +119,10 @@ func (e *Engine) Evaluate(
 			amount, err := evalNumber(rule.formulaProg, activation)
 			if err != nil {
 				out.Warnings = append(out.Warnings,
-					fmt.Sprintf("rule %q formula skipped on position %s: %v", rule.ID, p.ID, err))
+					fmt.Sprintf("rule %q formula skipped on position %s: %v", rule.ID, entry.pos.ID, err))
 				continue
 			}
-			comp := composeComponent(rule, p.ID, facts, amount)
+			comp := composeComponent(rule, entry.pos.ID, entry.facts, amount)
 			out.Components = append(out.Components, comp)
 			if comp.Applied {
 				out.HouseRequirement += comp.Delta
@@ -106,8 +130,136 @@ func (e *Engine) Evaluate(
 			}
 		}
 	}
+
+	for _, rule := range rb.rules {
+		if rule.Scope != "group" {
+			continue
+		}
+		if rule.Mode == "block" {
+			continue
+		}
+		// Account-level applies filters (account_types, phases) gate the
+		// rule wholesale; the position-level filters (instrument_kinds,
+		// sides) gate per-position membership in the bucket.
+		if len(rule.Applies.AccountTypes) > 0 && !contains(rule.Applies.AccountTypes, string(acct.AccountType)) {
+			continue
+		}
+		if len(rule.Applies.Phases) > 0 && !contains(rule.Applies.Phases, string(acct.Phase)) {
+			continue
+		}
+
+		buckets := map[string]*groupFacts{}
+		for _, entry := range entries {
+			if !appliesMatches(rule.Applies, acct, entry.sec, entry.side) {
+				continue
+			}
+			key := groupKeyFor(rule.GroupBy, entry.facts)
+			if key == "" {
+				continue
+			}
+			g, ok := buckets[key]
+			if !ok {
+				g = &groupFacts{key: key}
+				buckets[key] = g
+			}
+			g.longMV += entry.facts.longMV
+			g.shortMV += entry.facts.shortMV
+			g.grossMV += entry.facts.grossMV
+			g.netMV += entry.facts.netMV
+			g.positionCount++
+			g.baselineSum += entry.baseRq
+			g.positions = append(g.positions, groupMember{id: entry.pos.ID, baselineReq: entry.baseRq})
+		}
+		if len(buckets) == 0 {
+			continue
+		}
+
+		keys := make([]string, 0, len(buckets))
+		for k := range buckets {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+
+		for _, k := range keys {
+			g := buckets[k]
+			activation := map[string]any{
+				"account":   accountActivation(acct, snap),
+				"position":  map[string]any{},
+				"security":  map[string]any{},
+				"group":     g.activation(),
+				"constants": rb.constants,
+			}
+			matched, err := evalBool(rule.whenProg, activation)
+			if err != nil {
+				out.Warnings = append(out.Warnings,
+					fmt.Sprintf("rule %q when eval error on group %s: %v", rule.ID, k, err))
+				continue
+			}
+			if !matched {
+				continue
+			}
+			amount, err := evalNumber(rule.formulaProg, activation)
+			if err != nil {
+				out.Warnings = append(out.Warnings,
+					fmt.Sprintf("rule %q formula skipped on group %s: %v", rule.ID, k, err))
+				continue
+			}
+			comp := composeGroupComponent(rule, g, amount)
+			out.Components = append(out.Components, comp)
+			if comp.Applied {
+				out.HouseRequirement += comp.Delta
+				out.HouseCashCall += comp.Delta
+			}
+		}
+	}
+
 	out.Excess = snap.CurrentEquity - out.HouseRequirement
 	return out, nil
+}
+
+// composeGroupComponent fills a HouseComponent for a fired group-scope
+// rule. Per D2, max/floor compose BaselineAmount as the sum of Layer 1
+// per-position Requirement values within the group; add unconditionally
+// adds the formula value. Per-member baselines are echoed into Evidence
+// under "baseline.<positionID>" keys for round-trip auditability.
+func composeGroupComponent(rule overlayRule, g *groupFacts, amount float64) HouseComponent {
+	comp := HouseComponent{
+		RuleID:        rule.ID,
+		Scope:         rule.Scope,
+		Mode:          rule.Mode,
+		Basis:         rule.Basis,
+		Symbol:        g.key,
+		GroupKey:      g.key,
+		OverlayAmount: amount,
+		Formula:       rule.Formula,
+		Reason:        rule.Reason,
+		Evidence: map[string]float64{
+			"group.long_market_value":  g.longMV,
+			"group.short_market_value": g.shortMV,
+			"group.gross_market_value": g.grossMV,
+			"group.net_market_value":   g.netMV,
+			"group.position_count":     float64(g.positionCount),
+			"overlay.amount":           amount,
+		},
+	}
+	switch rule.Mode {
+	case "add":
+		comp.Delta = amount
+		comp.Applied = true
+	case "max", "floor":
+		comp.BaselineAmount = g.baselineSum
+		comp.Evidence["group.baseline_sum"] = g.baselineSum
+		for _, m := range g.positions {
+			comp.Evidence["baseline."+m.id] = m.baselineReq
+		}
+		delta := amount - g.baselineSum
+		if delta < 0 {
+			delta = 0
+		}
+		comp.Delta = delta
+		comp.Applied = delta > 0
+	}
+	return comp
 }
 
 // appliesMatches enforces each list-typed applies filter. An empty list
