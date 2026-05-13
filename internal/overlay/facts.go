@@ -118,6 +118,79 @@ func sideToken(f positionFacts) string {
 	}
 }
 
+// groupFacts is the per-group fact namespace exposed to CEL rules under
+// `group.*`. Built from the stock-like positions sharing a group key
+// (the `group_by` field on a group-scope rule, either "underlying" or
+// "symbol"). Group-scope evaluation lands incrementally; this issue
+// uses it only for block-mode rules.
+type groupFacts struct {
+	key           string
+	longMV        float64
+	shortMV       float64
+	grossMV       float64
+	netMV         float64
+	positionCount int
+}
+
+// activation builds the `group` namespace for CEL evaluation.
+func (g groupFacts) activation() map[string]any {
+	return map[string]any{
+		"key":                g.key,
+		"long_market_value":  g.longMV,
+		"short_market_value": g.shortMV,
+		"gross_market_value": g.grossMV,
+		"net_market_value":   g.netMV,
+		"position_count":     int64(g.positionCount),
+	}
+}
+
+// stockLikePos pairs a position ID with its derived facts so the
+// group-scope pass can reuse the work done by the position-scope pass.
+type stockLikePos struct {
+	positionID string
+	facts      positionFacts
+}
+
+// groupFactsByRule partitions the stock-like positions into groups
+// keyed by the rule's GroupBy attribute and returns the per-group
+// aggregates in deterministic key order. A position with no key for the
+// chosen attribute (empty underlying/symbol) is skipped — a group with
+// no identity cannot be referenced by a rule's audit trail.
+func groupFactsByRule(rule overlayRule, positions []stockLikePos) []groupFacts {
+	bucket := map[string]*groupFacts{}
+	var order []string
+	for _, sp := range positions {
+		var key string
+		switch rule.GroupBy {
+		case "underlying":
+			key = sp.facts.primarySymbol
+		case "symbol":
+			key = sp.facts.primarySymbol
+		default:
+			continue
+		}
+		if key == "" {
+			continue
+		}
+		gf, ok := bucket[key]
+		if !ok {
+			gf = &groupFacts{key: key}
+			bucket[key] = gf
+			order = append(order, key)
+		}
+		gf.longMV += sp.facts.longMV
+		gf.shortMV += sp.facts.shortMV
+		gf.grossMV += sp.facts.grossMV
+		gf.netMV += sp.facts.netMV
+		gf.positionCount++
+	}
+	out := make([]groupFacts, 0, len(order))
+	for _, k := range order {
+		out = append(out, *bucket[k])
+	}
+	return out
+}
+
 // factsActivation builds the `position` namespace for CEL evaluation.
 func (f positionFacts) activation() map[string]any {
 	return map[string]any{

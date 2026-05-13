@@ -516,6 +516,276 @@ type fakeErr struct{ msg string }
 
 func (f *fakeErr) Error() string { return f.msg }
 
+// --- block-mode + missing-reference tests (#45) ------------------------------
+
+func TestEvaluate_BlockMode_EmitsComponentAndViolation_D1(t *testing.T) {
+	rb := loadRules(t, `schema_version: "1"
+rules:
+  - id: restricted_list
+    scope: position
+    mode: block
+    reason: "symbol on restricted list"
+`)
+	p := stockPosition("p1", "AAPL", engine.Long, 100, 150)
+	acct := baseAccount(p)
+	snap := baseSnapshot(acct, []account.PositionEvaluation{{
+		PositionID: "p1",
+		Result:     engine.Result{Requirement: 3000, CashCall: 3000},
+	}})
+	e := &Engine{Rulebook: rb}
+	out, err := e.Evaluate(acct, snap, ReferenceData{})
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if len(out.Components) != 1 {
+		t.Fatalf("Components = %d, want 1", len(out.Components))
+	}
+	c := out.Components[0]
+	if c.Mode != "block" {
+		t.Errorf("Mode = %q, want block", c.Mode)
+	}
+	if c.Delta != 0 {
+		t.Errorf("Delta = %v, want 0", c.Delta)
+	}
+	if !c.Applied {
+		t.Errorf("Applied = false, want true")
+	}
+	if c.Reason != "symbol on restricted list" {
+		t.Errorf("Reason = %q", c.Reason)
+	}
+	if len(out.Violations) != 1 {
+		t.Fatalf("Violations = %d, want 1", len(out.Violations))
+	}
+	v := out.Violations[0]
+	if v.RuleID != "restricted_list" {
+		t.Errorf("Violation.RuleID = %q", v.RuleID)
+	}
+	if v.PositionID != "p1" || v.Symbol != "AAPL" {
+		t.Errorf("Violation position attribution = %+v", v)
+	}
+	if v.Message != "symbol on restricted list" {
+		t.Errorf("Violation.Message = %q", v.Message)
+	}
+}
+
+func TestEvaluate_BlockMode_DoesNotAffectHouseRequirementTotal(t *testing.T) {
+	rb := loadRules(t, `schema_version: "1"
+rules:
+  - id: block_with_formula
+    scope: position
+    mode: block
+    formula: "999999.0"
+    reason: "blocked"
+`)
+	p := stockPosition("p1", "AAPL", engine.Long, 100, 150)
+	acct := baseAccount(p)
+	snap := baseSnapshot(acct, []account.PositionEvaluation{{
+		PositionID: "p1",
+		Result:     engine.Result{Requirement: 3000, CashCall: 3000},
+	}})
+	e := &Engine{Rulebook: rb}
+	out, _ := e.Evaluate(acct, snap, ReferenceData{})
+	if out.HouseRequirement != 3000 {
+		t.Errorf("HouseRequirement = %v, want 3000 (block must not move total)", out.HouseRequirement)
+	}
+	if out.HouseCashCall != 3000 {
+		t.Errorf("HouseCashCall = %v, want 3000", out.HouseCashCall)
+	}
+}
+
+func TestEvaluate_BlockMode_WithOptionalFormula_RecordsOverlayAmountForInspection(t *testing.T) {
+	rb := loadRules(t, `schema_version: "1"
+rules:
+  - id: block_with_amount
+    scope: position
+    mode: block
+    formula: "1234.5"
+    reason: "inspection"
+`)
+	p := stockPosition("p1", "AAPL", engine.Long, 100, 150)
+	acct := baseAccount(p)
+	snap := baseSnapshot(acct, []account.PositionEvaluation{{PositionID: "p1"}})
+	e := &Engine{Rulebook: rb}
+	out, _ := e.Evaluate(acct, snap, ReferenceData{})
+	if len(out.Components) != 1 {
+		t.Fatalf("Components = %d", len(out.Components))
+	}
+	if got := out.Components[0].OverlayAmount; got != 1234.5 {
+		t.Errorf("OverlayAmount = %v, want 1234.5", got)
+	}
+	if out.Components[0].Delta != 0 {
+		t.Errorf("Delta = %v, want 0", out.Components[0].Delta)
+	}
+}
+
+func TestEvaluate_BlockMode_GroupScope(t *testing.T) {
+	rb := loadRules(t, `schema_version: "1"
+rules:
+  - id: group_block
+    scope: group
+    group_by: underlying
+    mode: block
+    reason: "group concentration blocked"
+`)
+	p1 := stockPosition("p1", "AAPL", engine.Long, 100, 150)
+	p2 := stockPosition("p2", "AAPL", engine.Long, 50, 150)
+	acct := baseAccount(p1, p2)
+	snap := baseSnapshot(acct, []account.PositionEvaluation{
+		{PositionID: "p1", Result: engine.Result{Requirement: 3000, CashCall: 3000}},
+		{PositionID: "p2", Result: engine.Result{Requirement: 1500, CashCall: 1500}},
+	})
+	e := &Engine{Rulebook: rb}
+	out, _ := e.Evaluate(acct, snap, ReferenceData{})
+	// Find group violation/component.
+	var groupViolations []HouseViolation
+	for _, v := range out.Violations {
+		if v.Scope == "group" {
+			groupViolations = append(groupViolations, v)
+		}
+	}
+	if len(groupViolations) != 1 {
+		t.Fatalf("group violations = %d, want 1; all=%+v", len(groupViolations), out.Violations)
+	}
+	gv := groupViolations[0]
+	if gv.GroupKey != "AAPL" {
+		t.Errorf("GroupKey = %q, want AAPL", gv.GroupKey)
+	}
+	if gv.PositionID != "" || gv.Symbol != "" {
+		t.Errorf("group violation should not carry PositionID/Symbol, got %+v", gv)
+	}
+	if gv.Message != "group concentration blocked" {
+		t.Errorf("Message = %q", gv.Message)
+	}
+	var groupComps []HouseComponent
+	for _, c := range out.Components {
+		if c.Scope == "group" {
+			groupComps = append(groupComps, c)
+		}
+	}
+	if len(groupComps) != 1 {
+		t.Fatalf("group components = %d, want 1", len(groupComps))
+	}
+	gc := groupComps[0]
+	if gc.GroupKey != "AAPL" || gc.Mode != "block" || gc.Delta != 0 || !gc.Applied {
+		t.Errorf("group component = %+v", gc)
+	}
+	if out.HouseRequirement != snap.TotalRequirement {
+		t.Errorf("HouseRequirement = %v, want %v (group block must not move total)",
+			out.HouseRequirement, snap.TotalRequirement)
+	}
+}
+
+func TestEvaluate_MissingReference_WarnPolicy_NoViolation(t *testing.T) {
+	rb := loadRules(t, `schema_version: "1"
+rules:
+  - id: warn_rule
+    scope: position
+    mode: add
+    formula: "10.0"
+    on_missing_reference: warn
+`)
+	p := stockPosition("p1", "XYZ", engine.Long, 10, 5)
+	acct := baseAccount(p)
+	snap := baseSnapshot(acct, []account.PositionEvaluation{{PositionID: "p1"}})
+	e := &Engine{Rulebook: rb}
+	out, _ := e.Evaluate(acct, snap, ReferenceData{})
+	if len(out.Violations) != 0 {
+		t.Errorf("warn-policy should not emit violations, got %v", out.Violations)
+	}
+	if len(out.Warnings) == 0 {
+		t.Errorf("warn-policy should emit a warning on missing ref")
+	}
+	if len(out.Components) != 1 {
+		t.Errorf("Components = %d, want 1", len(out.Components))
+	}
+}
+
+func TestEvaluate_MissingReference_ErrorPolicy_EmitsViolationAndSkipsRule_D3(t *testing.T) {
+	rb := loadRules(t, `schema_version: "1"
+rules:
+  - id: error_rule
+    scope: position
+    mode: add
+    formula: "10.0"
+    on_missing_reference: error
+`)
+	p := stockPosition("p1", "XYZ", engine.Long, 10, 5)
+	acct := baseAccount(p)
+	snap := baseSnapshot(acct, []account.PositionEvaluation{{
+		PositionID: "p1",
+		Result:     engine.Result{Requirement: 50, CashCall: 50},
+	}})
+	e := &Engine{Rulebook: rb}
+	out, _ := e.Evaluate(acct, snap, ReferenceData{})
+	if len(out.Violations) != 1 {
+		t.Fatalf("Violations = %d, want 1", len(out.Violations))
+	}
+	if out.Violations[0].RuleID != "error_rule" {
+		t.Errorf("Violation.RuleID = %q", out.Violations[0].RuleID)
+	}
+	for _, c := range out.Components {
+		if c.RuleID == "error_rule" {
+			t.Errorf("error_rule should not emit a component, got %+v", c)
+		}
+	}
+	if out.HouseRequirement != 50 {
+		t.Errorf("HouseRequirement = %v, want 50 (error-skipped rule must not contribute)", out.HouseRequirement)
+	}
+	if len(out.Warnings) != 0 {
+		t.Errorf("error-policy must replace the missing-ref warning, got %v", out.Warnings)
+	}
+}
+
+func TestEvaluate_MissingReference_ErrorPolicy_OtherRulesStillFire(t *testing.T) {
+	rb := loadRules(t, `schema_version: "1"
+rules:
+  - id: error_rule
+    scope: position
+    mode: add
+    formula: "10.0"
+    on_missing_reference: error
+  - id: warn_rule
+    scope: position
+    mode: add
+    formula: "7.0"
+    on_missing_reference: warn
+`)
+	p := stockPosition("p1", "XYZ", engine.Long, 10, 5)
+	acct := baseAccount(p)
+	snap := baseSnapshot(acct, []account.PositionEvaluation{{
+		PositionID: "p1",
+		Result:     engine.Result{Requirement: 0, CashCall: 0},
+	}})
+	e := &Engine{Rulebook: rb}
+	out, _ := e.Evaluate(acct, snap, ReferenceData{})
+	// error_rule → 1 violation, no component.
+	gotViolation := false
+	for _, v := range out.Violations {
+		if v.RuleID == "error_rule" {
+			gotViolation = true
+		}
+	}
+	if !gotViolation {
+		t.Errorf("expected violation for error_rule, got %v", out.Violations)
+	}
+	// warn_rule → component with delta 7.
+	var warnComp *HouseComponent
+	for i := range out.Components {
+		if out.Components[i].RuleID == "warn_rule" {
+			warnComp = &out.Components[i]
+		}
+	}
+	if warnComp == nil {
+		t.Fatalf("warn_rule should still fire; components=%v", out.Components)
+	}
+	if warnComp.Delta != 7 || !warnComp.Applied {
+		t.Errorf("warn component = %+v", warnComp)
+	}
+	if out.HouseRequirement != 7 {
+		t.Errorf("HouseRequirement = %v, want 7 (only warn_rule contributes)", out.HouseRequirement)
+	}
+}
+
 // --- deep copy helpers -------------------------------------------------------
 
 func deepCopyAccount(a account.Account) account.Account {

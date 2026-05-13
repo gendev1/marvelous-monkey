@@ -14,10 +14,11 @@ import (
 // reference data and returns the attributed HouseRequirement. It does
 // not mutate acct or snap.
 //
-// This issue (#43) implements position-scope rules only with modes
-// add / max / floor. Account-, symbol-, and group-scope rules and the
-// block mode are skipped silently — their issues land later. Option
-// positions are also skipped per the issue scope.
+// Position-scope modes add / max / floor / block are supported. Group
+// scope is supported only for mode=block in this issue; non-block
+// group-scope rules are skipped (their evaluation lands with the rest
+// of the group-scope path). Account- and symbol-scope rules are also
+// skipped. Option positions are skipped per the position-scope issue.
 func (e *Engine) Evaluate(
 	acct account.Account,
 	snap account.AccountSnapshot,
@@ -47,6 +48,10 @@ func (e *Engine) Evaluate(
 		posByID[p.ID] = p
 	}
 
+	// stockLikes collects each stock-like position's facts so the
+	// group-scope pass can reuse them without re-walking legs.
+	var stockLikes []stockLikePos
+
 	for _, eval := range snap.Evaluations {
 		if eval.Error != nil {
 			continue
@@ -59,24 +64,39 @@ func (e *Engine) Evaluate(
 		if !facts.hasStockLike {
 			continue
 		}
+		stockLikes = append(stockLikes, stockLikePos{positionID: p.ID, facts: facts})
+
 		sec, secOK := lookupSecurity(ref, facts.primarySymbol, facts.primaryVenue)
-		if !secOK {
-			out.Warnings = append(out.Warnings,
-				fmt.Sprintf("reference data missing for %s@%s; defaulted instrument_kind=stock",
-					facts.primarySymbol, facts.primaryVenue))
-		}
+		secMissing := !secOK
 
 		side := sideToken(facts)
+		errorViolationEmitted := false
 		for _, rule := range rb.rules {
 			if rule.Scope != "position" {
-				continue
-			}
-			if rule.Mode == "block" {
 				continue
 			}
 			if !appliesMatches(rule.Applies, acct, sec, side) {
 				continue
 			}
+			// D3: missing-ref + error policy → emit a violation for
+			// this rule and skip evaluating it. The position-level
+			// warning that would normally cover this case is
+			// suppressed below in favor of the violation.
+			if secMissing && rule.OnMissingReference == "error" {
+				out.Violations = append(out.Violations, HouseViolation{
+					RuleID:     rule.ID,
+					Scope:      rule.Scope,
+					PositionID: p.ID,
+					Symbol:     facts.symbol,
+					Message: fmt.Sprintf(
+						"reference data missing for %s@%s; rule %q requires reference data",
+						facts.primarySymbol, facts.primaryVenue, rule.ID,
+					),
+				})
+				errorViolationEmitted = true
+				continue
+			}
+
 			activation := map[string]any{
 				"account":   accountActivation(acct, snap),
 				"position":  facts.activation(),
@@ -92,6 +112,30 @@ func (e *Engine) Evaluate(
 			if !matched {
 				continue
 			}
+
+			if rule.Mode == "block" {
+				var amount float64
+				if rule.formulaProg != nil {
+					a, err := evalNumber(rule.formulaProg, activation)
+					if err != nil {
+						out.Warnings = append(out.Warnings,
+							fmt.Sprintf("rule %q formula skipped on position %s: %v", rule.ID, p.ID, err))
+						continue
+					}
+					amount = a
+				}
+				comp := composeBlockComponent(rule, p.ID, "", facts, amount)
+				out.Components = append(out.Components, comp)
+				out.Violations = append(out.Violations, HouseViolation{
+					RuleID:     rule.ID,
+					Scope:      rule.Scope,
+					PositionID: p.ID,
+					Symbol:     facts.symbol,
+					Message:    blockMessage(rule, "position"),
+				})
+				continue
+			}
+
 			amount, err := evalNumber(rule.formulaProg, activation)
 			if err != nil {
 				out.Warnings = append(out.Warnings,
@@ -105,7 +149,65 @@ func (e *Engine) Evaluate(
 				out.HouseCashCall += comp.Delta
 			}
 		}
+
+		// Per D3: the missing-ref warning is emitted at most once per
+		// position, and it is suppressed when an `error`-policy
+		// violation already covers the same condition.
+		if secMissing && !errorViolationEmitted {
+			out.Warnings = append(out.Warnings,
+				fmt.Sprintf("reference data missing for %s@%s; defaulted instrument_kind=stock",
+					facts.primarySymbol, facts.primaryVenue))
+		}
 	}
+
+	// Group-scope block pass. Only block-mode rules are evaluated here;
+	// add/max/floor at group scope land with the rest of the group path.
+	for _, rule := range rb.rules {
+		if rule.Scope != "group" || rule.Mode != "block" {
+			continue
+		}
+		if !groupAppliesMatches(rule.Applies, acct) {
+			continue
+		}
+		groups := groupFactsByRule(rule, stockLikes)
+		for _, gf := range groups {
+			activation := map[string]any{
+				"account":   accountActivation(acct, snap),
+				"group":     gf.activation(),
+				"position":  emptyFactMap(),
+				"security":  emptyFactMap(),
+				"constants": rb.constants,
+			}
+			matched, err := evalBool(rule.whenProg, activation)
+			if err != nil {
+				out.Warnings = append(out.Warnings,
+					fmt.Sprintf("rule %q when eval error on group %s: %v", rule.ID, gf.key, err))
+				continue
+			}
+			if !matched {
+				continue
+			}
+			var amount float64
+			if rule.formulaProg != nil {
+				a, err := evalNumber(rule.formulaProg, activation)
+				if err != nil {
+					out.Warnings = append(out.Warnings,
+						fmt.Sprintf("rule %q formula skipped on group %s: %v", rule.ID, gf.key, err))
+					continue
+				}
+				amount = a
+			}
+			comp := composeGroupBlockComponent(rule, gf, amount)
+			out.Components = append(out.Components, comp)
+			out.Violations = append(out.Violations, HouseViolation{
+				RuleID:   rule.ID,
+				Scope:    rule.Scope,
+				GroupKey: gf.key,
+				Message:  blockMessage(rule, "group"),
+			})
+		}
+	}
+
 	out.Excess = snap.CurrentEquity - out.HouseRequirement
 	return out, nil
 }
@@ -131,6 +233,20 @@ func appliesMatches(spec AppliesSpec, acct account.Account, sec SecurityFacts, s
 		if !contains(spec.Sides, side) {
 			return false
 		}
+	}
+	return true
+}
+
+// groupAppliesMatches enforces the subset of applies filters that make
+// sense at group scope: account type and phase. Instrument-kind and
+// side filters are per-position; group-scope block rules don't carry
+// them.
+func groupAppliesMatches(spec AppliesSpec, acct account.Account) bool {
+	if len(spec.AccountTypes) > 0 && !contains(spec.AccountTypes, string(acct.AccountType)) {
+		return false
+	}
+	if len(spec.Phases) > 0 && !contains(spec.Phases, string(acct.Phase)) {
+		return false
 	}
 	return true
 }
@@ -201,6 +317,10 @@ func securityActivation(sec SecurityFacts) map[string]any {
 		"marginable":         sec.Marginable,
 		"leveraged_factor":   sec.LeveragedFactor,
 	}
+}
+
+func emptyFactMap() map[string]any {
+	return map[string]any{}
 }
 
 func evalBool(prog cel.Program, activation map[string]any) (bool, error) {
@@ -287,4 +407,71 @@ func composeComponent(rule overlayRule, positionID string, facts positionFacts, 
 		comp.Applied = delta > 0
 	}
 	return comp
+}
+
+// composeBlockComponent builds the HouseComponent for a position-scope
+// block-mode match. Block components carry Delta = 0 and Applied = true
+// so the audit log records the match without moving the requirement.
+// BaselineAmount is informational. OverlayAmount records the formula
+// value when the rule carried one (zero otherwise).
+func composeBlockComponent(rule overlayRule, positionID, groupKey string, facts positionFacts, amount float64) HouseComponent {
+	return HouseComponent{
+		RuleID:         rule.ID,
+		Scope:          rule.Scope,
+		Mode:           rule.Mode,
+		Basis:          rule.Basis,
+		PositionID:     positionID,
+		Symbol:         facts.symbol,
+		GroupKey:       groupKey,
+		BaselineAmount: facts.baselineReq,
+		OverlayAmount:  amount,
+		Delta:          0,
+		Applied:        true,
+		Formula:        rule.Formula,
+		Reason:         rule.Reason,
+		Evidence: map[string]float64{
+			"position.long_market_value":    facts.longMV,
+			"position.short_market_value":   facts.shortMV,
+			"position.gross_market_value":   facts.grossMV,
+			"position.net_market_value":     facts.netMV,
+			"position.long_shares":          facts.longShares,
+			"position.short_shares":         facts.shortShares,
+			"position.baseline_requirement": facts.baselineReq,
+			"overlay.amount":                amount,
+		},
+	}
+}
+
+// composeGroupBlockComponent builds the HouseComponent for a
+// group-scope block match. GroupKey is set; PositionID and Symbol are
+// left empty so consumers can distinguish group attributions.
+func composeGroupBlockComponent(rule overlayRule, gf groupFacts, amount float64) HouseComponent {
+	return HouseComponent{
+		RuleID:        rule.ID,
+		Scope:         rule.Scope,
+		Mode:          rule.Mode,
+		Basis:         rule.Basis,
+		GroupKey:      gf.key,
+		OverlayAmount: amount,
+		Delta:         0,
+		Applied:       true,
+		Formula:       rule.Formula,
+		Reason:        rule.Reason,
+		Evidence: map[string]float64{
+			"group.gross_market_value": gf.grossMV,
+			"group.long_market_value":  gf.longMV,
+			"group.short_market_value": gf.shortMV,
+			"group.position_count":     float64(gf.positionCount),
+			"overlay.amount":           amount,
+		},
+	}
+}
+
+// blockMessage returns the user-facing violation message for a
+// block-mode match: rule.Reason if set, otherwise a generated default.
+func blockMessage(rule overlayRule, scope string) string {
+	if rule.Reason != "" {
+		return rule.Reason
+	}
+	return fmt.Sprintf("%s blocked by rule %q", scope, rule.ID)
 }
