@@ -27,7 +27,7 @@ func Aggregate(account Account, evals []PositionEvaluation) (AccountSnapshot, er
 	evalsByID := make(map[string]PositionEvaluation, len(evals))
 	for _, e := range evals {
 		if e.PositionID == "" {
-			continue
+			return AccountSnapshot{}, fmt.Errorf("invalid account: evaluation with empty position id")
 		}
 		if _, dup := evalsByID[e.PositionID]; dup {
 			return AccountSnapshot{}, fmt.Errorf("invalid account: duplicate evaluation for position id %q", e.PositionID)

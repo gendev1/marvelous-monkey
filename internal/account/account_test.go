@@ -696,6 +696,18 @@ func TestAggregate_doesNotMutatePositions(t *testing.T) {
 	}
 }
 
+func TestAggregate_rejectsEmptyEvalID(t *testing.T) {
+	a := minimalAccount()
+	evals := []PositionEvaluation{{Result: engine.Result{Permitted: true, Requirement: 1}}}
+	_, err := Aggregate(a, evals)
+	if err == nil {
+		t.Fatalf("expected error for empty eval position id")
+	}
+	if !strings.HasPrefix(err.Error(), "invalid account:") {
+		t.Fatalf("expected invalid-account prefix, got %v", err)
+	}
+}
+
 func TestAggregate_rejectsExtraEvalIDs(t *testing.T) {
 	a := minimalAccount()
 	evals := []PositionEvaluation{{PositionID: "ghost"}}
