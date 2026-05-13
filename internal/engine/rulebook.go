@@ -175,7 +175,9 @@ func LoadRulebook(path string) (*Rulebook, error) {
 			}
 		}
 		for _, mf := range r.Requires.MinFields {
-			key := r.ID + "/req:gte:" + mf.Slot + "." + mf.Field
+			// Include the gte expression in the key so two entries sharing
+			// (slot, field) but differing on gte don't collide in rb.progs.
+			key := r.ID + "/req:gte:" + mf.Slot + "." + mf.Field + ":" + mf.GTE
 			if _, err := rb.compile(key, mf.GTE, kindFormula); err != nil {
 				return nil, fmt.Errorf("invalid rulebook: rule %s min_fields legs.%s.%s gte %q: %w", r.ID, mf.Slot, mf.Field, mf.GTE, err)
 			}
