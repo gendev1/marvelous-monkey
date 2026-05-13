@@ -106,13 +106,21 @@ func TestValidate_rejectsDuplicatePositionIDs(t *testing.T) {
 func TestValidate_rejectsEmptyPositionID(t *testing.T) {
 	a := minimalAccount()
 	a.Positions[0].ID = ""
-	assertInvalidAccount(t, validate(a))
+	err := validate(a)
+	assertInvalidAccount(t, err)
+	if !strings.Contains(err.Error(), "position[0] ID is required") {
+		t.Fatalf("expected index-specific error for first position, got %v", err)
+	}
 
 	a2 := minimalAccount()
 	empty := longStockPosition()
 	empty.ID = ""
 	a2.Positions = append(a2.Positions, empty)
-	assertInvalidAccount(t, validate(a2))
+	err = validate(a2)
+	assertInvalidAccount(t, err)
+	if !strings.Contains(err.Error(), "position[1] ID is required") {
+		t.Fatalf("expected index-specific error for appended position, got %v", err)
+	}
 }
 
 func optionPosition(p, qty float64) AccountPosition {
