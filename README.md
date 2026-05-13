@@ -1,13 +1,13 @@
 # margincalc
 
-A programmable margin calculator. Strategy-based Reg T today; account aggregator and risk-based layer designed for, not yet built.
+A programmable margin calculator. Strategy-based Reg T and account aggregation today; risk-based margining is designed for, not yet built.
 
 The project owns three things:
 1. **An engine** — CEL-based rule evaluator with custom domain functions (`mpl`, `is_limited_risk`, `short_call_req`, …).
 2. **A rule set** — Cboe Margin Manual encoded as machine-readable YAML; house rules can replace or extend it.
 3. **A reconciliation harness** — CSV-in / CSV-out diff tool that compares engine output against an existing vendor.
 
-For the full plan see [`roadmap.html`](roadmap.html). For where current work fits, the layout below.
+For the full plan see [`ROADMAP.md`](ROADMAP.md). For where current work fits, the layout below.
 
 ## Layout
 
@@ -16,7 +16,7 @@ Canonical Go module layout — binaries in `cmd/`, implementation in `internal/`
 ```
 margincalc/
 ├── README.md                  this file
-├── roadmap.html               the plan (open in browser)
+├── ROADMAP.md                 the plan
 ├── go.mod / go.sum
 │
 ├── cmd/
@@ -40,7 +40,7 @@ margincalc/
 │   └── house_rules.example.yaml   schema template for the firm's rules
 │
 └── docs/
-    └── Margin_Manual.pdf      source document for cboe_baseline.yaml
+    └── epics/                 implementation notes by workstream
 ```
 
 Everything under `internal/` is module-private — Go won't let any package outside this module import it. That keeps the surface area honest while we're iterating. When the firm needs to expose this as an SDK to another internal service, a thin facade in `pkg/margincalc/` re-exports the relevant types from `internal/engine/`.
@@ -131,7 +131,7 @@ The DIFF rows clustered by `rule_id` are the firm's house policy made visible. U
 
 ## Future work — where it lands
 
-The roadmap items in `roadmap.html` map to this layout as:
+The roadmap items in `ROADMAP.md` map to this layout as:
 
 | Item | Where it lives |
 |---|---|

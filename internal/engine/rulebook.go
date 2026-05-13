@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"time"
@@ -270,13 +271,13 @@ func (rb *Rulebook) preparePosition(pos Position) Position {
 // behaviour for vendor-supplied positions with no legs is to fall through
 // to no-match and be classified as NO_RULE downstream.
 func validatePosition(pos Position) error {
-	if pos.U <= 0 {
+	if !isFinite(pos.U) || pos.U <= 0 {
 		return fmt.Errorf("invalid position: U must be > 0, got %g", pos.U)
 	}
 	if pos.Class == "" {
 		return fmt.Errorf("invalid position: class is required")
 	}
-	if pos.Lev <= 0 {
+	if !isFinite(pos.Lev) || pos.Lev <= 0 {
 		return fmt.Errorf("invalid position: lev must be > 0, got %g", pos.Lev)
 	}
 	for i, l := range pos.Legs {
@@ -298,23 +299,23 @@ func validateLeg(i int, l Leg) error {
 	default:
 		return fmt.Errorf("invalid position: leg %d kind %q is not one of option/stock/etf/etn/convertible/warrant", i, string(l.Kind))
 	}
-	if l.Mult <= 0 {
+	if !isFinite(l.Mult) || l.Mult <= 0 {
 		return fmt.Errorf("invalid position: leg %d mult must be > 0, got %g", i, l.Mult)
 	}
 	if l.Kind == OptionKind {
 		if l.OptionType != "put" && l.OptionType != "call" {
 			return fmt.Errorf("invalid position: leg %d option_type must be 'put' or 'call', got %q", i, l.OptionType)
 		}
-		if l.Qty <= 0 {
+		if !isFinite(l.Qty) || l.Qty <= 0 {
 			return fmt.Errorf("invalid position: leg %d qty must be > 0, got %g", i, l.Qty)
 		}
-		if l.K <= 0 {
+		if !isFinite(l.K) || l.K <= 0 {
 			return fmt.Errorf("invalid position: leg %d K must be > 0, got %g", i, l.K)
 		}
-		if l.P < 0 {
+		if !isFinite(l.P) || l.P < 0 {
 			return fmt.Errorf("invalid position: leg %d P must be >= 0, got %g", i, l.P)
 		}
-		if l.P0 < 0 {
+		if !isFinite(l.P0) || l.P0 < 0 {
 			return fmt.Errorf("invalid position: leg %d P0 must be >= 0, got %g", i, l.P0)
 		}
 		return nil
@@ -326,23 +327,27 @@ func validateLeg(i int, l Leg) error {
 	// rule binds it. ETF/ETN price stays unchecked here: only one rule reads
 	// it (short_index_call_long_etf) and rule-level required-field validation
 	// is the right home for that — see roadmap item #1.
-	if l.Shares <= 0 {
+	if !isFinite(l.Shares) || l.Shares <= 0 {
 		return fmt.Errorf("invalid position: leg %d shares must be > 0, got %g", i, l.Shares)
 	}
 	switch l.Kind {
 	case ConvertibleKind:
-		if l.Price <= 0 {
+		if !isFinite(l.Price) || l.Price <= 0 {
 			return fmt.Errorf("invalid position: leg %d convertible price must be > 0, got %g", i, l.Price)
 		}
 	case WarrantKind:
-		if l.Price <= 0 {
+		if !isFinite(l.Price) || l.Price <= 0 {
 			return fmt.Errorf("invalid position: leg %d warrant price must be > 0, got %g", i, l.Price)
 		}
-		if l.KEquivalent <= 0 {
+		if !isFinite(l.KEquivalent) || l.KEquivalent <= 0 {
 			return fmt.Errorf("invalid position: leg %d warrant K_equivalent must be > 0, got %g", i, l.KEquivalent)
 		}
 	}
 	return nil
+}
+
+func isFinite(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0)
 }
 
 // validateRawRulebook enforces structural invariants on a freshly-parsed
@@ -488,9 +493,24 @@ func validateRuleInputs(ruleID string, bound map[string]Leg) error {
 		if err := requireExpirationSlots(ruleID, bound, "bc", "bp", "sp", "sc"); err != nil {
 			return err
 		}
-		return requireSameStringField(ruleID, bound, "style", "bc", "bp", "sp", "sc")
+		if err := requireSameUnderlying(ruleID, bound, "bc", "bp", "sp", "sc"); err != nil {
+			return err
+		}
+		if err := requireSameStringField(ruleID, bound, "style", "bc", "bp", "sp", "sc"); err != nil {
+			return err
+		}
+		return requireSameContractSize(ruleID, bound, "bc", "bp", "sp", "sc")
 	case "short_box_spread":
-		return requireExpirationSlots(ruleID, bound, "bc", "sc")
+		if err := requireExpirationSlots(ruleID, bound, "bc", "bp", "sp", "sc"); err != nil {
+			return err
+		}
+		if err := requireSameUnderlying(ruleID, bound, "bc", "bp", "sp", "sc"); err != nil {
+			return err
+		}
+		if err := requireSameStringField(ruleID, bound, "style", "bc", "bp", "sp", "sc"); err != nil {
+			return err
+		}
+		return requireSameContractSize(ruleID, bound, "bc", "bp", "sp", "sc")
 	case "short_put_short_stock":
 		return requirePositive(ruleID, "ss", "short_sale_proceeds", bound["ss"].ShortSaleProceeds)
 	case "short_index_call_long_etf":
@@ -504,6 +524,14 @@ func validateRuleInputs(ruleID string, bound map[string]Leg) error {
 			return err
 		}
 		return requirePositive(ruleID, "le", "K_equivalent", bound["le"].KEquivalent)
+	case "covered_call":
+		if err := requireSameUnderlying(ruleID, bound, "sc", "ls"); err != nil {
+			return err
+		}
+		if bound["ls"].Shares < bound["sc"].Qty*bound["sc"].Mult {
+			return fmt.Errorf("invalid position: rule %s requires legs.ls.shares >= legs.sc.qty * legs.sc.mult", ruleID)
+		}
+		return nil
 	case "protective_put":
 		return requireNonEmpty(ruleID, "lp", "style", bound["lp"].Style)
 	case "long_call_short_stock":
@@ -556,8 +584,26 @@ func requireNonEmpty(ruleID, slot, field, value string) error {
 }
 
 func requirePositive(ruleID, slot, field string, value float64) error {
-	if value <= 0 {
+	if !isFinite(value) || value <= 0 {
 		return fmt.Errorf("invalid position: rule %s requires legs.%s.%s > 0, got %g", ruleID, slot, field, value)
+	}
+	return nil
+}
+
+func requireSameContractSize(ruleID string, bound map[string]Leg, slots ...string) error {
+	var want float64
+	for i, slot := range slots {
+		size := bound[slot].Qty * bound[slot].Mult
+		if !isFinite(size) || size <= 0 {
+			return fmt.Errorf("invalid position: rule %s requires legs.%s.qty * legs.%s.mult > 0, got %g", ruleID, slot, slot, size)
+		}
+		if i == 0 {
+			want = size
+			continue
+		}
+		if size != want {
+			return fmt.Errorf("invalid position: rule %s requires matching qty*mult across slots %v, got %g and %g", ruleID, slots, want, size)
+		}
 	}
 	return nil
 }
@@ -680,6 +726,11 @@ func (rb *Rulebook) evaluateOne(pos Position, rule Rule, accountType AccountType
 		keyPrefix = "margin"
 	default:
 		return Result{}, false, fmt.Errorf("unknown account type %q", string(accountType))
+	}
+	switch phase {
+	case Initial, Maintenance:
+	default:
+		return Result{}, false, fmt.Errorf("unknown phase %q", string(phase))
 	}
 	formulaKey := keyPrefix + "." + string(phase)
 

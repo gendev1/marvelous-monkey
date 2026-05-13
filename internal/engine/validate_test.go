@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,6 +83,30 @@ func TestValidate_nonPositiveU(t *testing.T) {
 	mustValidationError(t, rb, pos)
 }
 
+func TestValidate_nonFiniteInputs(t *testing.T) {
+	rb := loadRB(t)
+	tests := []struct {
+		name string
+		mut  func(*Position)
+	}{
+		{"U/NaN", func(p *Position) { p.U = math.NaN() }},
+		{"U/Inf", func(p *Position) { p.U = math.Inf(1) }},
+		{"Lev/NaN", func(p *Position) { p.Lev = math.NaN() }},
+		{"Mult/NaN", func(p *Position) { p.Legs[0].Mult = math.NaN() }},
+		{"Qty/NaN", func(p *Position) { p.Legs[0].Qty = math.NaN() }},
+		{"K/NaN", func(p *Position) { p.Legs[0].K = math.NaN() }},
+		{"P/NaN", func(p *Position) { p.Legs[0].P = math.NaN() }},
+		{"P0/NaN", func(p *Position) { p.Legs[0].P0 = math.NaN() }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pos := validShortPut()
+			tt.mut(&pos)
+			mustValidationError(t, rb, pos)
+		})
+	}
+}
+
 func TestValidate_missingOptionType(t *testing.T) {
 	rb := loadRB(t)
 	pos := validShortPut()
@@ -117,6 +142,30 @@ func TestValidate_stockMissingShares(t *testing.T) {
 		},
 	}
 	mustValidationError(t, rb, pos)
+}
+
+func TestValidate_coveredCallRequiresFullShareCoverage(t *testing.T) {
+	rb := loadRB(t)
+	pos := Position{
+		U: 92.38, Class: "equity",
+		Legs: []Leg{
+			{Side: Short, Kind: OptionKind, OptionType: "call",
+				K: 90, P: 7.0, P0: 7.0, Qty: 1, Mult: 100, Style: "american", Underlying: "XYZ"},
+			{Side: Long, Kind: StockKind, Shares: 1, Underlying: "XYZ"},
+		},
+	}
+	mustValidationError(t, rb, pos)
+}
+
+func TestValidate_invalidPhaseRejected(t *testing.T) {
+	rb := loadRB(t)
+	_, err := rb.Evaluate(validShortPut(), CashAccount, Phase("bad"))
+	if err == nil {
+		t.Fatalf("expected invalid phase error, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown phase") {
+		t.Fatalf("got %q, want unknown phase error", err.Error())
+	}
 }
 
 // Convertible leg without a price — the rule formula is
@@ -198,6 +247,28 @@ func TestRuleInputValidation_shortIndexCallLongETFMissingKEquivalent(t *testing.
 	}
 }
 
+func TestRuleInputValidation_shortIndexCallLongETFRequiresCoverageForQty(t *testing.T) {
+	rb := loadRB(t)
+	pos := Position{
+		U: 450.0, Class: "equity",
+		Legs: []Leg{
+			{Side: Short, Kind: OptionKind, OptionType: "call",
+				K: 4500, P: 10.0, P0: 10.0, Qty: 2, Mult: 100,
+				Underlying: "XYZ_INDEX"},
+			{Side: Long, Kind: ETFKind,
+				Price: 450.0, Shares: 100, KEquivalent: 460.0,
+				TracksIndex: "XYZ_INDEX", Leveraged: false},
+		},
+	}
+	_, err := rb.Evaluate(pos, MarginAccount, Initial)
+	if err == nil {
+		t.Fatalf("expected no-match for insufficient ETF coverage, got nil")
+	}
+	if !strings.Contains(err.Error(), "no rule matched") {
+		t.Fatalf("got %q, want no rule matched", err.Error())
+	}
+}
+
 // Empty Legs is NOT a validation error — Item 2.4 of the plan requires this
 // to fall through to no-match and be bucketed as NO_RULE by recon. If a
 // future change makes empty legs a validation error, recon's NO_RULE bucket
@@ -269,6 +340,36 @@ func TestRuleInputValidation_genericMixedUnderlyings(t *testing.T) {
 		},
 	}
 	mustValidationError(t, rb, pos)
+}
+
+func TestRuleInputValidation_longBoxRequiresUnderlyingAndContractSize(t *testing.T) {
+	rb := loadRB(t)
+	pos := Position{
+		U: 100, Class: "equity",
+		Legs: []Leg{
+			{Side: Long, Kind: OptionKind, OptionType: "call",
+				K: 95, P: 8, P0: 8, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-12-20"},
+			{Side: Short, Kind: OptionKind, OptionType: "put",
+				K: 95, P: 1, P0: 1, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-12-20"},
+			{Side: Long, Kind: OptionKind, OptionType: "put",
+				K: 105, P: 4, P0: 4, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-12-20"},
+			{Side: Short, Kind: OptionKind, OptionType: "call",
+				K: 105, P: 2, P0: 2, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-12-20"},
+		},
+	}
+	mustValidationError(t, rb, pos)
+
+	for i := range pos.Legs {
+		pos.Legs[i].Underlying = "XYZ"
+	}
+	pos.Legs[3].Qty = 2
+	_, err := rb.Evaluate(pos, MarginAccount, Initial)
+	if err == nil {
+		t.Fatalf("expected no-match for mismatched box contract size, got nil")
+	}
+	if !strings.Contains(err.Error(), "no rule matched") {
+		t.Fatalf("got %q, want no rule matched", err.Error())
+	}
 }
 
 func TestRuleInputValidation_shortPutShortStockMissingShortSaleProceeds(t *testing.T) {

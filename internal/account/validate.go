@@ -122,6 +122,14 @@ func validateLeg(accountID, posLabel string, j int, leg engine.Leg, pos engine.P
 
 	switch leg.Kind {
 	case engine.OptionKind:
+		if !isFinite(leg.Mult) {
+			return fmt.Errorf("invalid account: id=%q %s leg[%d] option mult=%g is not finite",
+				accountID, posLabel, j, leg.Mult)
+		}
+		if leg.Mult < 0 {
+			return fmt.Errorf("invalid account: id=%q %s leg[%d] option mult=%g must be >= 0",
+				accountID, posLabel, j, leg.Mult)
+		}
 		if !isFinite(leg.P) {
 			return fmt.Errorf("invalid account: id=%q %s leg[%d] option P=%g is not finite",
 				accountID, posLabel, j, leg.P)
