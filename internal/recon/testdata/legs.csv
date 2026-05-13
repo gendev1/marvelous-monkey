@@ -1,0 +1,7 @@
+position_id,leg_index,side,kind,option_type,K,P,P0,qty,mult,style,venue,expiration,underlying,time_to_expiration_months
+POS_short_call,0,short,option,call,120,8.40,8.40,1,100,american,listed,2026-12-19,X,3.0
+POS_vertical,0,long,option,call,125,3.80,3.80,1,100,american,listed,2024-11-15,XYZ,3.0
+POS_vertical,1,short,option,call,120,8.40,8.40,1,100,american,listed,2024-11-15,XYZ,3.0
+POS_short_put,0,short,option,put,80,2.0,2.0,1,100,american,listed,2026-12-19,Y,3.0
+POS_unmatched,0,long,option,call,30,4.0,3.5,1,100,american,listed,2027-05-15,ETN1,12.0
+POS_vendor_wrong,0,short,option,call,120,8.40,8.40,1,100,american,listed,2026-12-19,X,3.0

@@ -1,4 +1,4 @@
-package margincalc
+package engine
 
 import (
 	"fmt"
@@ -12,7 +12,11 @@ import (
 
 // buildEnv constructs a CEL environment exposing the variables and custom
 // functions referenced by the rules YAML. The rates table is captured so
-// rate(class, field) can resolve.
+// rate(class, field) can resolve. The `constants` variable is declared
+// here but its value is bound per-evaluation via the activation map (see
+// Rulebook.Evaluate), letting rule expressions reference named thresholds
+// (e.g. `constants.long_option_loan_value_threshold_months`) instead of
+// hard-coding magic numbers.
 func buildEnv(rates map[string]map[string]float64) (*cel.Env, error) {
 	legType := cel.MapType(cel.StringType, cel.DynType)
 	legsType := cel.MapType(cel.StringType, legType)
@@ -23,6 +27,7 @@ func buildEnv(rates map[string]map[string]float64) (*cel.Env, error) {
 		cel.Variable("class", cel.StringType),
 		cel.Variable("lev", cel.DoubleType),
 		cel.Variable("legs", legsType),
+		cel.Variable("constants", cel.MapType(cel.StringType, cel.DynType)),
 
 		// --- max / min (CEL stdlib has no max/min) ---
 		cel.Function("max",
@@ -79,14 +84,14 @@ func buildEnv(rates map[string]map[string]float64) (*cel.Env, error) {
 				[]*cel.Type{legType, cel.DoubleType, cel.StringType, cel.DoubleType, cel.DoubleType},
 				cel.DoubleType,
 				cel.FunctionBinding(func(args ...ref.Val) ref.Val {
-					return types.Double(shortOptionReq(rates, args, /*isCall=*/ true))
+					return shortOptionReq(rates, args, /*isCall=*/ true)
 				}))),
 		cel.Function("short_put_req",
 			cel.Overload("short_put_req_overload",
 				[]*cel.Type{legType, cel.DoubleType, cel.StringType, cel.DoubleType, cel.DoubleType},
 				cel.DoubleType,
 				cel.FunctionBinding(func(args ...ref.Val) ref.Val {
-					return types.Double(shortOptionReq(rates, args, /*isCall=*/ false))
+					return shortOptionReq(rates, args, /*isCall=*/ false)
 				}))),
 
 		// --- mpl(legs) → double ---
@@ -129,19 +134,31 @@ func buildEnv(rates map[string]map[string]float64) (*cel.Env, error) {
 }
 
 // shortOptionReq implements the per-position USD requirement for an uncovered
-// short option. args = [leg, U, class, lev, p].
-func shortOptionReq(rates map[string]map[string]float64, args []ref.Val, isCall bool) float64 {
+// short option. args = [leg, U, class, lev, p]. Returns a CEL error if the
+// class is unknown — silently zeroing here previously masked typos in `class`.
+func shortOptionReq(rates map[string]map[string]float64, args []ref.Val, isCall bool) ref.Val {
 	leg := args[0].(traits.Mapper)
 	U := asFloat(args[1])
 	cls := asString(args[2])
 	lev := asFloat(args[3])
 	p := asFloat(args[4])
 
+	t, ok := rates[cls]
+	if !ok {
+		return types.NewErr("unknown rate class %q", cls)
+	}
+	base, ok := t["base_pct"]
+	if !ok {
+		return types.NewErr("rate class %q missing base_pct", cls)
+	}
+	minPct, ok := t["min_pct"]
+	if !ok {
+		return types.NewErr("rate class %q missing min_pct", cls)
+	}
+
 	K := mapFloat(leg, "K")
 	qty := mapFloat(leg, "qty")
 	mult := mapFloat(leg, "mult")
-	base := rates[cls]["base_pct"]
-	minPct := rates[cls]["min_pct"]
 
 	var basic, minRule float64
 	if isCall {
@@ -151,39 +168,56 @@ func shortOptionReq(rates map[string]map[string]float64, args []ref.Val, isCall 
 		basic = base*lev*U - math.Max(0, U-K)
 		minRule = minPct * lev * K
 	}
-	return qty * mult * (p + math.Max(basic, minRule))
+	return types.Double(qty * mult * (p + math.Max(basic, minRule)))
+}
+
+// legView is the projection of a CEL leg map that the iterating helpers care
+// about. Centralized so the map-field reads happen in exactly one place.
+type legView struct {
+	kind       string
+	side       Side
+	optionType string
+	K, qty, mu float64
+}
+
+// forEachLeg invokes fn for every leg in the map (option or otherwise). The
+// raw mapper is passed alongside the projection so callers that need extra
+// fields (e.g. a custom premium field name) don't have to re-implement
+// iteration. If fn returns false, iteration stops early.
+func forEachLeg(legsVal ref.Val, fn func(legView, traits.Mapper) bool) {
+	legsMap := legsVal.(traits.Mapper)
+	it := legsMap.Iterator()
+	for it.HasNext() == types.Bool(true) {
+		k := it.Next()
+		legM, ok := legsMap.Get(k).(traits.Mapper)
+		if !ok {
+			continue
+		}
+		l := legView{
+			kind:       mapString(legM, "kind"),
+			side:       Side(mapString(legM, "side")),
+			optionType: mapString(legM, "option_type"),
+			K:          mapFloat(legM, "K"),
+			qty:        mapFloat(legM, "qty"),
+			mu:         mapFloat(legM, "mult"),
+		}
+		if !fn(l, legM) {
+			return
+		}
+	}
 }
 
 // maxPotentialLoss walks every option leg in the map, enumerates distinct
 // strikes, evaluates each leg's payoff at each strike, and returns the
 // largest net loss as a non-negative USD amount.
 func maxPotentialLoss(legsVal ref.Val) float64 {
-	legsMap := legsVal.(traits.Mapper)
-	type optLeg struct {
-		side       Side
-		optionType string
-		K, qty, mu float64
-	}
-	var opts []optLeg
-	it := legsMap.Iterator()
-	for it.HasNext() == types.Bool(true) {
-		k := it.Next()
-		v := legsMap.Get(k)
-		legM, ok := v.(traits.Mapper)
-		if !ok {
-			continue
+	var opts []legView
+	forEachLeg(legsVal, func(l legView, _ traits.Mapper) bool {
+		if l.kind == "option" {
+			opts = append(opts, l)
 		}
-		if mapString(legM, "kind") != "option" {
-			continue
-		}
-		opts = append(opts, optLeg{
-			side:       Side(mapString(legM, "side")),
-			optionType: mapString(legM, "option_type"),
-			K:          mapFloat(legM, "K"),
-			qty:        mapFloat(legM, "qty"),
-			mu:         mapFloat(legM, "mult"),
-		})
-	}
+		return true
+	})
 	if len(opts) == 0 {
 		return 0
 	}
@@ -218,55 +252,48 @@ func maxPotentialLoss(legsVal ref.Val) float64 {
 }
 
 // isLimitedRisk returns true iff an option-only structure has bounded loss
-// in both underlying tails. The only ways an options-only payoff diverges:
-//   - net short call quantity (U → ∞: each uncovered short call loses ∞)
-//   - any non-option leg (stock/etf/etn) — flagged unbounded here because
-//     those structures belong to specific rules, not this catch-all
-//
-// Naked short puts are bounded (max loss = qty*mult*K at U=0) so they pass.
+// in both underlying tails. An options-only payoff diverges when:
+//   - net short call quantity > 0 (U → ∞: each uncovered short call loses ∞)
+//   - net short put quantity > 0 (U → 0: each uncovered short put loses K)
+//     — a single naked short put IS bounded (loss caps at qty*mult*K), but a
+//     ratio put spread with more shorts than longs is unbounded relative to
+//     the long protection; mpl() would only sample existing strikes and miss
+//     the U→0 corner. Reject the whole structure here rather than try to
+//     distinguish "bounded but large" from "unbounded".
+//   - any non-option leg (stock/etf/etn) — those belong to specific rules,
+//     not this catch-all
 func isLimitedRisk(legsVal ref.Val) bool {
-	legsMap := legsVal.(traits.Mapper)
-	netCallQty := 0.0
-	it := legsMap.Iterator()
-	for it.HasNext() == types.Bool(true) {
-		k := it.Next()
-		legM, ok := legsMap.Get(k).(traits.Mapper)
-		if !ok {
-			continue
-		}
-		if mapString(legM, "kind") != "option" {
-			return false
-		}
-		if mapString(legM, "option_type") != "call" {
-			continue
+	netCallQty, netPutQty := 0.0, 0.0
+	limited := true
+	forEachLeg(legsVal, func(l legView, _ traits.Mapper) bool {
+		if l.kind != "option" {
+			limited = false
+			return false // short-circuit
 		}
 		sign := 1.0
-		if Side(mapString(legM, "side")) == Short {
+		if l.side == Short {
 			sign = -1.0
 		}
-		netCallQty += sign * mapFloat(legM, "qty")
-	}
-	return netCallQty >= 0
+		switch l.optionType {
+		case "call":
+			netCallQty += sign * l.qty
+		case "put":
+			netPutQty += sign * l.qty
+		}
+		return true
+	})
+	return limited && netCallQty >= 0 && netPutQty >= 0
 }
 
 func sumPremiums(legsVal ref.Val, field string, side Side) float64 {
-	legsMap := legsVal.(traits.Mapper)
 	total := 0.0
-	it := legsMap.Iterator()
-	for it.HasNext() == types.Bool(true) {
-		k := it.Next()
-		legM, ok := legsMap.Get(k).(traits.Mapper)
-		if !ok {
-			continue
+	forEachLeg(legsVal, func(l legView, legM traits.Mapper) bool {
+		if l.kind != "option" || l.side != side {
+			return true
 		}
-		if mapString(legM, "kind") != "option" {
-			continue
-		}
-		if Side(mapString(legM, "side")) != side {
-			continue
-		}
-		total += mapFloat(legM, field) * mapFloat(legM, "qty") * mapFloat(legM, "mult")
-	}
+		total += mapFloat(legM, field) * l.qty * l.mu
+		return true
+	})
 	return total
 }
 

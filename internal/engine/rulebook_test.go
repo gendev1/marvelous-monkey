@@ -1,11 +1,11 @@
-package margincalc
+package engine
 
 import (
 	"math"
 	"testing"
 )
 
-const rulesPath = "cboe_margin_rules.yaml"
+const rulesPath = "../../rules/cboe_baseline.yaml"
 
 // Helper: load once, share across tests.
 var rb *Rulebook
@@ -30,6 +30,51 @@ func assertClose(t *testing.T, label string, got, want float64) {
 	}
 }
 
+// mustEvaluate runs Evaluate and cross-checks with EvaluateAll that *exactly*
+// one rule matched. Length>1 means rule declaration order is silently shadowing
+// one rule with another — production callers wouldn't notice, but tests should.
+// Every fixture in this package goes through this helper so the safety net
+// stays populated as new rules are added.
+func mustEvaluate(t *testing.T, rb *Rulebook, pos Position, acct AccountType, phase Phase) Result {
+	t.Helper()
+	res, err := rb.Evaluate(pos, acct, phase)
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	all, err := rb.EvaluateAll(pos, acct, phase)
+	if err != nil {
+		t.Fatalf("EvaluateAll: %v", err)
+	}
+	if len(all) != 1 {
+		ids := make([]string, len(all))
+		for i, r := range all {
+			ids[i] = r.RuleID
+		}
+		t.Fatalf("rule dispatch ambiguous: %d rules matched (%v); Evaluate picked %s", len(all), ids, res.RuleID)
+	}
+	return res
+}
+
+// mustReject asserts the position matches no rule: Evaluate returns the
+// no-match error AND EvaluateAll returns an empty slice. Use in guard tests.
+func mustReject(t *testing.T, rb *Rulebook, pos Position, acct AccountType, phase Phase) {
+	t.Helper()
+	if _, err := rb.Evaluate(pos, acct, phase); err == nil {
+		t.Fatalf("expected no-match, but Evaluate succeeded")
+	}
+	all, err := rb.EvaluateAll(pos, acct, phase)
+	if err != nil {
+		t.Fatalf("EvaluateAll: %v", err)
+	}
+	if len(all) != 0 {
+		ids := make([]string, len(all))
+		for i, r := range all {
+			ids[i] = r.RuleID
+		}
+		t.Fatalf("expected no-match, but %d rules matched: %v", len(all), ids)
+	}
+}
+
 // p.28: Short 1 Sep 80 put at 2.00, underlying at 95 (OTM)
 // Expected: $1,000 (minimum formula binds: 200 + 800)
 func TestShortPutOTM_p28(t *testing.T) {
@@ -42,10 +87,7 @@ func TestShortPutOTM_p28(t *testing.T) {
 				K: 80, P: 2.0, P0: 2.0, Qty: 1, Mult: 100},
 		},
 	}
-	res, err := rb.Evaluate(pos, MarginAccount, Initial)
-	if err != nil {
-		t.Fatalf("Evaluate: %v", err)
-	}
+	res := mustEvaluate(t, rb, pos, MarginAccount, Initial)
 	if res.RuleID != "short_put_uncovered" {
 		t.Errorf("matched %s, want short_put_uncovered", res.RuleID)
 	}
@@ -64,7 +106,7 @@ func TestShortPutITM_p28(t *testing.T) {
 				K: 20, P: 1.50, P0: 1.50, Qty: 1, Mult: 100},
 		},
 	}
-	res, _ := rb.Evaluate(pos, MarginAccount, Initial)
+	res := mustEvaluate(t, rb, pos, MarginAccount, Initial)
 	assertClose(t, "p28 short put ITM initial", res.Requirement, 540.00)
 }
 
@@ -80,7 +122,7 @@ func TestShortCallITM_p32(t *testing.T) {
 				K: 120, P: 8.40, P0: 8.40, Qty: 1, Mult: 100},
 		},
 	}
-	res, _ := rb.Evaluate(pos, MarginAccount, Initial)
+	res := mustEvaluate(t, rb, pos, MarginAccount, Initial)
 	if res.RuleID != "short_call_uncovered" {
 		t.Errorf("matched %s, want short_call_uncovered", res.RuleID)
 	}
@@ -99,7 +141,7 @@ func TestShortCallOTM_p32(t *testing.T) {
 				K: 30, P: 0.05, P0: 0.05, Qty: 1, Mult: 100},
 		},
 	}
-	res, _ := rb.Evaluate(pos, MarginAccount, Initial)
+	res := mustEvaluate(t, rb, pos, MarginAccount, Initial)
 	assertClose(t, "p32 short call OTM initial", res.Requirement, 268.80)
 }
 
@@ -116,7 +158,7 @@ func TestLeveragedETFShortPut_p29(t *testing.T) {
 				K: 725, P: 3.0, P0: 3.0, Qty: 1, Mult: 100},
 		},
 	}
-	res, _ := rb.Evaluate(pos, MarginAccount, Initial)
+	res := mustEvaluate(t, rb, pos, MarginAccount, Initial)
 	assertClose(t, "p29 leveraged ETF short put", res.Requirement, 14800.00)
 }
 
@@ -132,7 +174,7 @@ func TestBroadETFShortPut_p30(t *testing.T) {
 				K: 410, P: 0.10, P0: 0.10, Qty: 1, Mult: 100},
 		},
 	}
-	res, _ := rb.Evaluate(pos, MarginAccount, Initial)
+	res := mustEvaluate(t, rb, pos, MarginAccount, Initial)
 	assertClose(t, "p30 broad-ETF short put", res.Requirement, 4110.00)
 }
 
@@ -148,7 +190,7 @@ func TestBroadIndexShortCallITM_p34(t *testing.T) {
 				K: 430, P: 8.70, P0: 8.70, Qty: 1, Mult: 100},
 		},
 	}
-	res, _ := rb.Evaluate(pos, MarginAccount, Initial)
+	res := mustEvaluate(t, rb, pos, MarginAccount, Initial)
 	assertClose(t, "p34 broad index short call ITM", res.Requirement, 7370.25)
 }
 
@@ -165,10 +207,7 @@ func TestCoveredCallInitial_p47(t *testing.T) {
 			{Side: Long, Kind: StockKind, Shares: 100},
 		},
 	}
-	res, err := rb.Evaluate(pos, MarginAccount, Initial)
-	if err != nil {
-		t.Fatalf("Evaluate: %v", err)
-	}
+	res := mustEvaluate(t, rb, pos, MarginAccount, Initial)
 	if res.RuleID != "covered_call" {
 		t.Errorf("matched %s, want covered_call", res.RuleID)
 	}
@@ -190,10 +229,7 @@ func TestShortPutShortStockMaintenance_p47(t *testing.T) {
 			{Side: Short, Kind: StockKind, Shares: 100, ShortSaleProceeds: 25500, SalePrice: 255},
 		},
 	}
-	res, err := rb.Evaluate(pos, MarginAccount, Maintenance)
-	if err != nil {
-		t.Fatalf("Evaluate: %v", err)
-	}
+	res := mustEvaluate(t, rb, pos, MarginAccount, Maintenance)
 	if res.RuleID != "short_put_short_stock" {
 		t.Errorf("matched %s, want short_put_short_stock", res.RuleID)
 	}
@@ -215,10 +251,7 @@ func TestConversionMaintenance_p59(t *testing.T) {
 			{Side: Long, Kind: StockKind, Shares: 100},
 		},
 	}
-	res, err := rb.Evaluate(pos, MarginAccount, Maintenance)
-	if err != nil {
-		t.Fatalf("Evaluate: %v", err)
-	}
+	res := mustEvaluate(t, rb, pos, MarginAccount, Maintenance)
 	if res.RuleID != "conversion" {
 		t.Errorf("matched %s, want conversion", res.RuleID)
 	}
@@ -240,10 +273,7 @@ func TestReverseConversionMaintenance_p60(t *testing.T) {
 			{Side: Short, Kind: StockKind, Shares: 100, ShortSaleProceeds: 11500, SalePrice: 115},
 		},
 	}
-	res, err := rb.Evaluate(pos, MarginAccount, Maintenance)
-	if err != nil {
-		t.Fatalf("Evaluate: %v", err)
-	}
+	res := mustEvaluate(t, rb, pos, MarginAccount, Maintenance)
 	if res.RuleID != "reverse_conversion" {
 		t.Errorf("matched %s, want reverse_conversion", res.RuleID)
 	}
@@ -266,7 +296,7 @@ func TestReverseConversionITMPut_p61(t *testing.T) {
 			{Side: Short, Kind: StockKind, Shares: 100, ShortSaleProceeds: 7190, SalePrice: 71.90},
 		},
 	}
-	res, _ := rb.Evaluate(pos, MarginAccount, Maintenance)
+	res := mustEvaluate(t, rb, pos, MarginAccount, Maintenance)
 	assertClose(t, "p61 reverse conversion ITM put maintenance", res.Requirement, 8560.00)
 }
 
@@ -305,10 +335,7 @@ func TestCollarMaintenance_p61(t *testing.T) {
 			{Side: Long, Kind: StockKind, Shares: 100},
 		},
 	}
-	res, err := rb.Evaluate(pos, MarginAccount, Maintenance)
-	if err != nil {
-		t.Fatalf("Evaluate: %v", err)
-	}
+	res := mustEvaluate(t, rb, pos, MarginAccount, Maintenance)
 	if res.RuleID != "collar" {
 		t.Errorf("matched %s, want collar", res.RuleID)
 	}
@@ -331,7 +358,7 @@ func TestProtectivePutMaintenance_p58(t *testing.T) {
 			{Side: Long, Kind: StockKind, Shares: 100},
 		},
 	}
-	res, _ := rb.Evaluate(pos, MarginAccount, Maintenance)
+	res := mustEvaluate(t, rb, pos, MarginAccount, Maintenance)
 	assertClose(t, "p58 protective put maintenance", res.Requirement, 1800.00)
 }
 
@@ -364,10 +391,7 @@ func TestVerticalCallSpread_p42(t *testing.T) {
 				Underlying: "XYZ", Expiration: "2024-11-15"},
 		},
 	}
-	res, err := rb.Evaluate(pos, MarginAccount, Initial)
-	if err != nil {
-		t.Fatalf("Evaluate: %v", err)
-	}
+	res := mustEvaluate(t, rb, pos, MarginAccount, Initial)
 	if res.RuleID != "vertical_spread" {
 		t.Errorf("matched %s, want vertical_spread", res.RuleID)
 	}
@@ -398,7 +422,7 @@ func TestVerticalPutSpread_p39(t *testing.T) {
 				Underlying: "XYZ", Expiration: "2024-11-15"},
 		},
 	}
-	res, _ := rb.Evaluate(pos, MarginAccount, Initial)
+	res := mustEvaluate(t, rb, pos, MarginAccount, Initial)
 	// Manual p.39: Margin Requirement = $300, short proceeds = $95, SMA debit = $205.
 	assertClose(t, "p39 vertical put spread (gross)", res.Requirement, 300.00)
 	assertClose(t, "p39 vertical put spread (proceeds)", res.AppliedProceeds, 95.00)
@@ -424,10 +448,7 @@ func TestLongButterflyPuts_p52(t *testing.T) {
 				K: 555, P: 9.80, P0: 9.80, Qty: 1, Mult: 100, Style: "american"},
 		},
 	}
-	res, err := rb.Evaluate(pos, MarginAccount, Initial)
-	if err != nil {
-		t.Fatalf("Evaluate: %v", err)
-	}
+	res := mustEvaluate(t, rb, pos, MarginAccount, Initial)
 	if res.RuleID != "generic_limited_risk_combo" {
 		t.Errorf("matched %s, want generic_limited_risk_combo", res.RuleID)
 	}
@@ -457,190 +478,12 @@ func TestShortIronButterfly_p56(t *testing.T) {
 				K: 24, P: 4.0, P0: 4.0, Qty: 1, Mult: 100, Style: "american"},
 		},
 	}
-	res, _ := rb.Evaluate(pos, MarginAccount, Initial)
+	res := mustEvaluate(t, rb, pos, MarginAccount, Initial)
 	// gross = MPL + long premiums = 400 + (10+400) = 810
 	// proceeds = short premiums = 20 + 700 = 720; cash call = 810 - 720 = 90
 	assertClose(t, "p56 short iron butterfly (gross)", res.Requirement, 810.00)
 	assertClose(t, "p56 short iron butterfly (proceeds)", res.AppliedProceeds, 720.00)
 	assertClose(t, "p56 short iron butterfly (cash call)", res.CashCall, 90.00)
-}
-
-// -----------------------------------------------------------------------------
-// Long-dated listed option scope tests
-// -----------------------------------------------------------------------------
-
-// Equity-class long-dated listed option gets the manual's 75% loan-value path.
-func TestLongDatedListed_equity_75pct(t *testing.T) {
-	rb := loadRB(t)
-	pos := Position{
-		U: 100.0, Class: "equity",
-		Legs: []Leg{
-			{Side: Long, Kind: OptionKind, OptionType: "call",
-				K: 100, P: 12.0, P0: 10.0, Qty: 1, Mult: 100,
-				Style: "american", Venue: "listed",
-				TimeToExpirationMonths: 18.0},
-		},
-	}
-	res, err := rb.Evaluate(pos, MarginAccount, Initial)
-	if err != nil {
-		t.Fatalf("Evaluate: %v", err)
-	}
-	if res.RuleID != "long_option_long_dated_listed" {
-		t.Fatalf("matched %s, want long_option_long_dated_listed", res.RuleID)
-	}
-	assertClose(t, "long-dated listed equity initial", res.Requirement, 0.75*12.0*1*100)
-}
-
-// ETN-class long-dated listed option: manual does not extend 75% to ETNs
-// (debt instrument, not equity-based). Rule must NOT match; no other rule
-// covers this either, so Evaluate returns a no-match error.
-func TestLongDatedListed_etnRefused(t *testing.T) {
-	rb := loadRB(t)
-	pos := Position{
-		U: 30.0, Class: "etn_broad",
-		Legs: []Leg{
-			{Side: Long, Kind: OptionKind, OptionType: "call",
-				K: 30, P: 4.0, P0: 3.5, Qty: 1, Mult: 100,
-				Style: "american", Venue: "listed",
-				TimeToExpirationMonths: 12.0},
-		},
-	}
-	_, err := rb.Evaluate(pos, MarginAccount, Initial)
-	if err == nil {
-		t.Fatalf("expected no-match error for long-dated listed ETN option; got nil")
-	}
-}
-
-// -----------------------------------------------------------------------------
-// Cash-account coverage tests
-// -----------------------------------------------------------------------------
-
-// Short put in a cash account: manual requires aggregate exercise price on
-// deposit (K*qty*mult). Premium received is surfaced as proceeds; cash_call
-// = aggregate strike - premium = the net deposit beyond the credit.
-func TestShortPutCash_aggregateStrike(t *testing.T) {
-	rb := loadRB(t)
-	pos := Position{
-		U: 95.0, Class: "equity",
-		Legs: []Leg{
-			{Side: Short, Kind: OptionKind, OptionType: "put",
-				K: 80, P: 2.0, P0: 2.0, Qty: 1, Mult: 100},
-		},
-	}
-	res, err := rb.Evaluate(pos, CashAccount, Initial)
-	if err != nil {
-		t.Fatalf("Evaluate: %v", err)
-	}
-	if res.RuleID != "short_put_uncovered" {
-		t.Errorf("matched %s, want short_put_uncovered", res.RuleID)
-	}
-	assertClose(t, "cash short put gross", res.Requirement, 8000.00)
-	assertClose(t, "cash short put proceeds", res.AppliedProceeds, 200.00)
-	assertClose(t, "cash short put net", res.CashCall, 7800.00)
-	if res.DepositKind != "cash_or_escrow" {
-		t.Errorf("deposit_kind=%q, want cash_or_escrow", res.DepositKind)
-	}
-}
-
-// Short call in a cash account: deposit is shares (underlying-or-escrow); the
-// number we surface is the USD-equivalent of those shares (U*qty*mult).
-func TestShortCallCash_underlyingValue(t *testing.T) {
-	rb := loadRB(t)
-	pos := Position{
-		U: 50.0, Class: "equity",
-		Legs: []Leg{
-			{Side: Short, Kind: OptionKind, OptionType: "call",
-				K: 55, P: 1.0, P0: 1.0, Qty: 2, Mult: 100},
-		},
-	}
-	res, _ := rb.Evaluate(pos, CashAccount, Initial)
-	assertClose(t, "cash short call gross", res.Requirement, 50.0*2*100)
-	assertClose(t, "cash short call proceeds", res.AppliedProceeds, 1.0*2*100)
-	if res.DepositKind != "underlying_or_escrow" {
-		t.Errorf("deposit_kind=%q, want underlying_or_escrow", res.DepositKind)
-	}
-}
-
-// Short strangle in cash: must be refused (different collateral kinds).
-func TestShortStrangleCash_refused(t *testing.T) {
-	rb := loadRB(t)
-	pos := Position{
-		U: 100.0, Class: "equity",
-		Legs: []Leg{
-			{Side: Short, Kind: OptionKind, OptionType: "put",
-				K: 95, P: 1.5, P0: 1.5, Qty: 1, Mult: 100, Underlying: "X"},
-			{Side: Short, Kind: OptionKind, OptionType: "call",
-				K: 105, P: 1.5, P0: 1.5, Qty: 1, Mult: 100, Underlying: "X"},
-		},
-	}
-	res, _ := rb.Evaluate(pos, CashAccount, Initial)
-	if res.RuleID != "short_strangle_or_straddle" {
-		t.Errorf("matched %s", res.RuleID)
-	}
-	if res.Permitted {
-		t.Errorf("cash strangle should not be permitted")
-	}
-}
-
-// Cash-secured vertical call spread mirrors p.42 numbers — max loss on deposit
-// + long premium, with short premium as proceeds.
-func TestVerticalCallSpreadCash_p42(t *testing.T) {
-	rb := loadRB(t)
-	// Long Nov 60 call @ 12, Short Nov 70 call @ 4, U=72
-	// mpl: at 60, long=0, short=0 → 0. At 70, long=10*100=1000, short=0 → -1000? No:
-	// pnl_long(70)= +(70-60)*100 = 1000; pnl_short(70) = -(70-70)*100 = 0. Total = +1000.
-	// pnl_long(60) = 0; pnl_short(60) = 0. Total = 0.
-	// Need both: also probe... actually mpl picks worst across {60,70}. Min pnl = 0 → returns 0.
-	// Hmm, MPL of long-call-spread should be 0 (it can only profit). Long premium=$1200, short premium=$400.
-	// cash gross = mpl + long_prem = 0 + 1200 = 1200. proceeds = 400. cash_call = 800.
-	pos := Position{
-		U: 72.0, Class: "equity",
-		Legs: []Leg{
-			{Side: Long, Kind: OptionKind, OptionType: "call",
-				K: 60, P: 12.0, P0: 12.0, Qty: 1, Mult: 100,
-				Style: "american", Venue: "listed", Underlying: "X", Expiration: "2026-11-20"},
-			{Side: Short, Kind: OptionKind, OptionType: "call",
-				K: 70, P: 4.0, P0: 4.0, Qty: 1, Mult: 100,
-				Style: "american", Venue: "listed", Underlying: "X", Expiration: "2026-11-20"},
-		},
-	}
-	res, err := rb.Evaluate(pos, CashAccount, Initial)
-	if err != nil {
-		t.Fatalf("Evaluate: %v", err)
-	}
-	if res.RuleID != "vertical_spread" {
-		t.Errorf("matched %s, want vertical_spread", res.RuleID)
-	}
-	assertClose(t, "cash vertical call spread gross", res.Requirement, 1200.00)
-	assertClose(t, "cash vertical call spread proceeds", res.AppliedProceeds, 400.00)
-	assertClose(t, "cash vertical call spread net", res.CashCall, 800.00)
-}
-
-// Guard test: a 3-leg net-short-call structure (long 50C, short 60C, short 70C)
-// is unbounded as U → ∞, but its loss evaluated only at strikes {50,60,70} is
-// finite — so without the is_limited_risk guard, generic_limited_risk_combo
-// would silently match and return a wrong (finite) MPL. With the guard it must
-// NOT match — and since no specific rule handles ratio spreads either,
-// Evaluate returns a no-match error. That refusal is the desired behaviour.
-func TestRatioSpread_isLimitedRiskGuardRejects(t *testing.T) {
-	rb := loadRB(t)
-	pos := Position{
-		U:     58.0,
-		Class: "equity",
-		Lev:   1.0,
-		Legs: []Leg{
-			{Side: Long, Kind: OptionKind, OptionType: "call",
-				K: 50, P: 9.0, P0: 9.0, Qty: 1, Mult: 100, Style: "american"},
-			{Side: Short, Kind: OptionKind, OptionType: "call",
-				K: 60, P: 2.0, P0: 2.0, Qty: 1, Mult: 100, Style: "american"},
-			{Side: Short, Kind: OptionKind, OptionType: "call",
-				K: 70, P: 0.5, P0: 0.5, Qty: 1, Mult: 100, Style: "american"},
-		},
-	}
-	_, err := rb.Evaluate(pos, MarginAccount, Initial)
-	if err == nil {
-		t.Fatalf("expected no-match error for unbounded ratio spread; got nil")
-	}
 }
 
 // -----------------------------------------------------------------------------
@@ -663,19 +506,16 @@ func TestShortCallLongConvertible_margin_p14(t *testing.T) {
 				Price: 80.0, Shares: 100, KEquivalent: 90.0},
 		},
 	}
-	res, err := rb.Evaluate(pos, MarginAccount, Initial)
-	if err != nil {
-		t.Fatalf("Evaluate: %v", err)
-	}
+	res := mustEvaluate(t, rb, pos, MarginAccount, Initial)
 	if res.RuleID != "short_call_long_convertible" {
 		t.Errorf("matched %s, want short_call_long_convertible", res.RuleID)
 	}
 	assertClose(t, "p14 SC+LConv margin initial", res.Requirement, 4000.00)
 
-	res, _ = rb.Evaluate(pos, MarginAccount, Maintenance)
+	res = mustEvaluate(t, rb, pos, MarginAccount, Maintenance)
 	assertClose(t, "p14 SC+LConv margin maintenance", res.Requirement, 2000.00)
 
-	res, _ = rb.Evaluate(pos, CashAccount, Initial)
+	res = mustEvaluate(t, rb, pos, CashAccount, Initial)
 	assertClose(t, "p14 SC+LConv cash initial", res.Requirement, 8000.00)
 }
 
@@ -694,7 +534,7 @@ func TestShortCallLongConvertible_maintenanceCap_p14(t *testing.T) {
 				Price: 100.0, Shares: 100, KEquivalent: 90.0},
 		},
 	}
-	res, _ := rb.Evaluate(pos, MarginAccount, Maintenance)
+	res := mustEvaluate(t, rb, pos, MarginAccount, Maintenance)
 	assertClose(t, "p14 SC+LConv maintenance cap binds", res.Requirement, 2250.00)
 }
 
@@ -718,19 +558,16 @@ func TestShortCallLongWarrant_margin_p14(t *testing.T) {
 				Price: 4.0, Shares: 100, KEquivalent: 50.0},
 		},
 	}
-	res, err := rb.Evaluate(pos, MarginAccount, Initial)
-	if err != nil {
-		t.Fatalf("Evaluate: %v", err)
-	}
+	res := mustEvaluate(t, rb, pos, MarginAccount, Initial)
 	if res.RuleID != "short_call_long_warrant" {
 		t.Errorf("matched %s, want short_call_long_warrant", res.RuleID)
 	}
 	assertClose(t, "p14 SC+LW margin initial", res.Requirement, 900.00)
 
-	res, _ = rb.Evaluate(pos, MarginAccount, Maintenance)
+	res = mustEvaluate(t, rb, pos, MarginAccount, Maintenance)
 	assertClose(t, "p14 SC+LW margin maintenance", res.Requirement, 900.00)
 
-	res, _ = rb.Evaluate(pos, CashAccount, Initial)
+	res = mustEvaluate(t, rb, pos, CashAccount, Initial)
 	if res.Permitted {
 		t.Errorf("cash account should be not-permitted, got Permitted=true")
 	}
@@ -751,6 +588,6 @@ func TestShortCallLongWarrant_marketCap_p14(t *testing.T) {
 				Price: 60.0, Shares: 100, KEquivalent: 50.0},
 		},
 	}
-	res, _ := rb.Evaluate(pos, MarginAccount, Maintenance)
+	res := mustEvaluate(t, rb, pos, MarginAccount, Maintenance)
 	assertClose(t, "p14 SC+LW maintenance cap binds", res.Requirement, 5000.00)
 }

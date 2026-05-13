@@ -1,0 +1,324 @@
+package engine
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/google/cel-go/cel"
+	"gopkg.in/yaml.v3"
+)
+
+// --- YAML schema mirrors the rules file ---
+
+type LegSlot struct {
+	Name       string `yaml:"name"`
+	Side       string `yaml:"side,omitempty"`
+	Kind       string `yaml:"kind,omitempty"`
+	OptionType string `yaml:"option_type,omitempty"`
+	Venue      string `yaml:"venue,omitempty"`
+}
+
+type MatchSpec struct {
+	Legs        []LegSlot `yaml:"legs,omitempty"`
+	LegsPattern string    `yaml:"legs_pattern,omitempty"`
+	MinLegs     int       `yaml:"min_legs,omitempty"`
+	MaxLegs     int       `yaml:"max_legs,omitempty"`
+	Constraints []string  `yaml:"constraints,omitempty"`
+}
+
+type FormulaBlock struct {
+	Initial             string `yaml:"initial,omitempty"`
+	Maintenance         string `yaml:"maintenance,omitempty"`
+	InitialProceeds     string `yaml:"initial_proceeds,omitempty"`
+	MaintenanceProceeds string `yaml:"maintenance_proceeds,omitempty"`
+	Permitted           *bool  `yaml:"permitted,omitempty"`
+	DepositKind         string `yaml:"deposit_kind,omitempty"`
+}
+
+type RuleFormulas struct {
+	Cash   FormulaBlock `yaml:"cash,omitempty"`
+	Margin FormulaBlock `yaml:"margin,omitempty"`
+}
+
+type Rule struct {
+	ID       string       `yaml:"id"`
+	Match    MatchSpec    `yaml:"match"`
+	Formulas RuleFormulas `yaml:"formulas"`
+}
+
+type rawRulebook struct {
+	SchemaVersion string                                 `yaml:"schema_version"`
+	Rates         map[string]map[string]float64          `yaml:"rates"`
+	Rules         []Rule                                 `yaml:"rules"`
+	Constants     map[string]any                         `yaml:"constants,omitempty"`
+}
+
+// Rulebook is the loaded, compiled rule set. Safe for concurrent reads once
+// LoadRulebook returns — that call pre-compiles every formula and constraint
+// into `progs`, so Evaluate only does map lookups. Do not call compile()
+// concurrently with Evaluate from outside this file: it writes to `progs`.
+type Rulebook struct {
+	rates     map[string]map[string]float64
+	constants map[string]any
+	rules     []Rule
+	env       *cel.Env
+	progs     map[string]cel.Program // cache: rule_id + "/" + key → compiled Program
+}
+
+func LoadRulebook(path string) (*Rulebook, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read rules: %w", err)
+	}
+	var raw rawRulebook
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("parse rules: %w", err)
+	}
+	// Normalize numeric constants to float64 so CEL double arithmetic works
+	// regardless of whether the YAML wrote `9` (int) or `9.0` (float).
+	constants := map[string]any{}
+	for k, v := range raw.Constants {
+		switch x := v.(type) {
+		case int:
+			constants[k] = float64(x)
+		case int64:
+			constants[k] = float64(x)
+		default:
+			constants[k] = v
+		}
+	}
+	env, err := buildEnv(raw.Rates)
+	if err != nil {
+		return nil, fmt.Errorf("build CEL env: %w", err)
+	}
+	rb := &Rulebook{
+		rates:     raw.Rates,
+		constants: constants,
+		rules:     raw.Rules,
+		env:       env,
+		progs:     map[string]cel.Program{},
+	}
+	// Pre-compile every formula and constraint for fail-fast + cache.
+	for _, r := range raw.Rules {
+		for _, c := range r.Match.Constraints {
+			if _, err := rb.compile(r.ID+"/c:"+c, c); err != nil {
+				return nil, fmt.Errorf("rule %s constraint %q: %w", r.ID, c, err)
+			}
+		}
+		for label, expr := range formulaExprs(r) {
+			if expr == "" {
+				continue
+			}
+			if _, err := rb.compile(r.ID+"/"+label, expr); err != nil {
+				return nil, fmt.Errorf("rule %s formula %s: %w", r.ID, label, err)
+			}
+		}
+	}
+	return rb, nil
+}
+
+func formulaExprs(r Rule) map[string]string {
+	return map[string]string{
+		"cash.initial":                r.Formulas.Cash.Initial,
+		"cash.maintenance":            r.Formulas.Cash.Maintenance,
+		"cash.initial_proceeds":       r.Formulas.Cash.InitialProceeds,
+		"cash.maintenance_proceeds":   r.Formulas.Cash.MaintenanceProceeds,
+		"margin.initial":              r.Formulas.Margin.Initial,
+		"margin.maintenance":          r.Formulas.Margin.Maintenance,
+		"margin.initial_proceeds":     r.Formulas.Margin.InitialProceeds,
+		"margin.maintenance_proceeds": r.Formulas.Margin.MaintenanceProceeds,
+	}
+}
+
+func (rb *Rulebook) compile(key, expr string) (cel.Program, error) {
+	if prog, ok := rb.progs[key]; ok {
+		return prog, nil
+	}
+	ast, iss := rb.env.Compile(expr)
+	if iss.Err() != nil {
+		return nil, iss.Err()
+	}
+	prog, err := rb.env.Program(ast)
+	if err != nil {
+		return nil, err
+	}
+	rb.progs[key] = prog
+	return prog, nil
+}
+
+// Evaluate finds the first rule that matches `pos` and returns the requirement
+// for (accountType, phase). Returns an error if no rule matches.
+func (rb *Rulebook) Evaluate(pos Position, accountType AccountType, phase Phase) (Result, error) {
+	pos = rb.preparePosition(pos)
+	for _, rule := range rb.rules {
+		res, ok, err := rb.evaluateOne(pos, rule, accountType, phase)
+		if err != nil {
+			return Result{}, err
+		}
+		if ok {
+			return res, nil
+		}
+	}
+	return Result{}, fmt.Errorf("no rule matched position with %d legs", len(pos.Legs))
+}
+
+// EvaluateAll returns the Result for every rule whose match binds AND whose
+// constraints all hold for `pos`, in YAML declaration order. Length > 1 means
+// rule order is silently shadowing one rule with another in Evaluate; length 0
+// means Evaluate would return a no-match error.
+//
+// Production callers should use Evaluate. EvaluateAll exists to surface
+// dispatch ambiguity in tests (assert exactly one match per fixture) and as
+// a debug aid when reconciliation produces a surprising number.
+func (rb *Rulebook) EvaluateAll(pos Position, accountType AccountType, phase Phase) ([]Result, error) {
+	pos = rb.preparePosition(pos)
+	var matches []Result
+	for _, rule := range rb.rules {
+		res, ok, err := rb.evaluateOne(pos, rule, accountType, phase)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			matches = append(matches, res)
+		}
+	}
+	return matches, nil
+}
+
+// preparePosition applies position-level defaults: Lev=1 if zero, and
+// `default_contract_multiplier` (or 100) for any leg with Mult==0. Returns a
+// Position with a freshly-copied Legs slice so the caller's slice is never
+// written to.
+func (rb *Rulebook) preparePosition(pos Position) Position {
+	if pos.Lev == 0 {
+		pos.Lev = 1.0
+	}
+	defaultMult := 100.0
+	if v, ok := rb.constants["default_contract_multiplier"].(float64); ok {
+		defaultMult = v
+	}
+	legs := make([]Leg, len(pos.Legs))
+	copy(legs, pos.Legs)
+	for i := range legs {
+		if legs[i].Mult == 0 {
+			legs[i].Mult = defaultMult
+		}
+	}
+	pos.Legs = legs
+	return pos
+}
+
+// evaluateOne applies a single rule to an already-prepared Position.
+// Returns:
+//   - (res, true, nil)  the rule matched, constraints held, and a result was
+//     computed (numeric, permitted=false, or deposit-kind-only).
+//   - (_,  false, nil)  the rule does not apply: either bindSlots refused, or
+//     a constraint evaluated cleanly to false.
+//   - (_,  false, err)  CEL compile/eval failure or rulebook configuration
+//     error (no formula AND no deposit_kind for the requested key).
+func (rb *Rulebook) evaluateOne(pos Position, rule Rule, accountType AccountType, phase Phase) (Result, bool, error) {
+	bound, ok := rb.tryMatch(pos, rule)
+	if !ok {
+		return Result{}, false, nil
+	}
+	legsMap := map[string]any{}
+	for name, leg := range bound {
+		legsMap[name] = leg.toMap()
+	}
+	activation := map[string]any{
+		"U":         pos.U,
+		"class":     pos.Class,
+		"lev":       pos.Lev,
+		"legs":      legsMap,
+		"constants": rb.constants,
+	}
+	// Constraints. A clean `false` demotes to "doesn't match"; a CEL eval
+	// error is surfaced (likely a rule bug).
+	for _, c := range rule.Match.Constraints {
+		prog, err := rb.compile(rule.ID+"/c:"+c, c)
+		if err != nil {
+			return Result{}, false, fmt.Errorf("compile constraint %s %q: %w", rule.ID, c, err)
+		}
+		out, _, err := prog.Eval(activation)
+		if err != nil {
+			return Result{}, false, fmt.Errorf("eval constraint %s %q: %w", rule.ID, c, err)
+		}
+		if b, ok := out.Value().(bool); !ok || !b {
+			return Result{}, false, nil
+		}
+	}
+
+	var block FormulaBlock
+	var keyPrefix string
+	switch accountType {
+	case CashAccount:
+		block = rule.Formulas.Cash
+		keyPrefix = "cash"
+	case MarginAccount:
+		block = rule.Formulas.Margin
+		keyPrefix = "margin"
+	default:
+		return Result{}, false, fmt.Errorf("unknown account type %q", string(accountType))
+	}
+	formulaKey := keyPrefix + "." + string(phase)
+
+	if block.Permitted != nil && !*block.Permitted {
+		return Result{RuleID: rule.ID, FormulaKey: formulaKey, AccountType: string(accountType), Phase: string(phase), Permitted: false}, true, nil
+	}
+
+	var expr, proceedsExpr, proceedsKey string
+	switch phase {
+	case Initial:
+		expr = block.Initial
+		proceedsExpr = block.InitialProceeds
+		proceedsKey = keyPrefix + ".initial_proceeds"
+	case Maintenance:
+		expr = block.Maintenance
+		proceedsExpr = block.MaintenanceProceeds
+		proceedsKey = keyPrefix + ".maintenance_proceeds"
+	}
+	// deposit_kind-only (no numeric formula): return the kind. Otherwise we
+	// compute the number AND attach the kind — both are meaningful.
+	if expr == "" {
+		if block.DepositKind != "" {
+			return Result{RuleID: rule.ID, FormulaKey: formulaKey, AccountType: string(accountType), Phase: string(phase), Permitted: true, DepositKind: block.DepositKind}, true, nil
+		}
+		return Result{}, false, fmt.Errorf("rule %s has no %s formula", rule.ID, formulaKey)
+	}
+
+	prog, err := rb.compile(rule.ID+"/"+formulaKey, expr)
+	if err != nil {
+		return Result{}, false, fmt.Errorf("compile %s: %w", rule.ID, err)
+	}
+	out, _, err := prog.Eval(activation)
+	if err != nil {
+		return Result{}, false, fmt.Errorf("eval %s: %w", rule.ID, err)
+	}
+	// asFloat tolerates an integer-typed CEL result (e.g. literal `0`).
+	req := asFloat(out)
+
+	var proceeds float64
+	if proceedsExpr != "" {
+		pprog, err := rb.compile(rule.ID+"/"+proceedsKey, proceedsExpr)
+		if err != nil {
+			return Result{}, false, fmt.Errorf("compile %s %s: %w", rule.ID, proceedsKey, err)
+		}
+		pout, _, err := pprog.Eval(activation)
+		if err != nil {
+			return Result{}, false, fmt.Errorf("eval %s %s: %w", rule.ID, proceedsKey, err)
+		}
+		proceeds = asFloat(pout)
+	}
+
+	return Result{
+		RuleID:          rule.ID,
+		FormulaKey:      formulaKey,
+		AccountType:     string(accountType),
+		Phase:           string(phase),
+		Requirement:     req,
+		AppliedProceeds: proceeds,
+		CashCall:        req - proceeds,
+		Permitted:       true,
+		DepositKind:     block.DepositKind,
+	}, true, nil
+}

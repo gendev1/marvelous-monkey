@@ -1,4 +1,4 @@
-package margincalc
+package engine
 
 // Side and Kind are the leg's role in the position.
 type Side string
@@ -75,7 +75,6 @@ type Position struct {
 	UnderlyingIsEquityBased bool    `yaml:"underlying_is_equity_based,omitempty" json:"underlying_is_equity_based,omitempty"`
 }
 
-// Result is the output of one evaluation.
 // Result is the output of one evaluation.
 //
 // The Cboe manual distinguishes three numbers per position:

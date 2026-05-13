@@ -1,0 +1,6 @@
+position_id,U,class,lev,account_type,phase,vendor_requirement
+POS_short_call,128.50,equity,1.0,margin,initial,3410.00
+POS_vertical,128.50,equity,1.0,margin,initial,880.00
+POS_short_put,95.00,equity,1.0,margin,initial,1000.00
+POS_unmatched,50.00,etn_broad,1.0,margin,initial,2500.00
+POS_vendor_wrong,128.50,equity,1.0,margin,initial,2000.00

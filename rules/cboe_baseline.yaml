@@ -66,7 +66,7 @@ rules:
       legs:
         - { name: opt, side: long, kind: option }
       constraints:
-        - "legs.opt.time_to_expiration_months <= 9.0"
+        - "legs.opt.time_to_expiration_months <= constants.long_option_loan_value_threshold_months"
     formulas:
       cash:
         initial:     "legs.opt.P0 * legs.opt.qty * legs.opt.mult"
@@ -81,7 +81,7 @@ rules:
       legs:
         - { name: opt, side: long, kind: option, venue: listed }
       constraints:
-        - "legs.opt.time_to_expiration_months > 9.0"
+        - "legs.opt.time_to_expiration_months > constants.long_option_loan_value_threshold_months"
         # 75% loan value applies only to equity / equity-ETF / index / vol-index
         # underlyings. ETNs are debt instruments — manual does NOT extend the
         # 75% allowance to them. A long-dated listed option on an ETN class
@@ -93,8 +93,8 @@ rules:
         initial:     "legs.opt.P0 * legs.opt.qty * legs.opt.mult"
         maintenance: "0.0"
       margin:
-        initial:     "0.75 * legs.opt.P * legs.opt.qty * legs.opt.mult"
-        maintenance: "0.75 * legs.opt.P * legs.opt.qty * legs.opt.mult"
+        initial:     "constants.long_listed_option_loan_value_pct * legs.opt.P * legs.opt.qty * legs.opt.mult"
+        maintenance: "constants.long_listed_option_loan_value_pct * legs.opt.P * legs.opt.qty * legs.opt.mult"
 
   # ---------------------------------------------------------------------------
   - id: long_option_long_dated_otc
@@ -102,7 +102,7 @@ rules:
       legs:
         - { name: opt, side: long, kind: option, venue: otc }
       constraints:
-        - "legs.opt.time_to_expiration_months > 9.0"
+        - "legs.opt.time_to_expiration_months > constants.long_option_loan_value_threshold_months"
         - "legs.opt.style == 'american'"
         - "legs.opt.broker_guaranteed == true"
     formulas:
@@ -112,7 +112,7 @@ rules:
       margin:
         initial: |
           legs.opt.qty * legs.opt.mult * (
-            0.75 * (legs.opt.option_type == 'call'
+            constants.long_listed_option_loan_value_pct * (legs.opt.option_type == 'call'
                     ? intrinsic_call(legs.opt.K, U)
                     : intrinsic_put(legs.opt.K, U))
             + max(0.0, legs.opt.P0 - (legs.opt.option_type == 'call'
@@ -120,7 +120,7 @@ rules:
                                        : intrinsic_put(legs.opt.K, U)))
           )
         maintenance: |
-          0.75 * legs.opt.qty * legs.opt.mult * (
+          constants.long_listed_option_loan_value_pct * legs.opt.qty * legs.opt.mult * (
             legs.opt.option_type == 'call'
             ? intrinsic_call(legs.opt.K, U)
             : intrinsic_put(legs.opt.K, U)
