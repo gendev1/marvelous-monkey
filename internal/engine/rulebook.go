@@ -503,7 +503,7 @@ func validateRuleInputs(ruleID string, bound map[string]Leg) error {
 		if err := requirePositive(ruleID, "le", "price", bound["le"].Price); err != nil {
 			return err
 		}
-		return requirePositive(ruleID, "sc", "K_equivalent", bound["sc"].KEquivalent)
+		return requirePositive(ruleID, "le", "K_equivalent", bound["le"].KEquivalent)
 	case "protective_put":
 		return requireNonEmpty(ruleID, "lp", "style", bound["lp"].Style)
 	case "long_call_short_stock":

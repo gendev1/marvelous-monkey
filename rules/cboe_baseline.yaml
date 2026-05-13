@@ -415,7 +415,7 @@ rules:
         permitted: false
       margin:
         initial:              "0.50 * legs.le.price * legs.le.shares"
-        maintenance:          "0.25 * min(legs.le.price, legs.sc.K_equivalent) * legs.le.shares"
+        maintenance:          "0.25 * min(legs.le.price, legs.le.K_equivalent) * legs.le.shares"
         initial_proceeds:     "legs.sc.P0 * legs.sc.qty * legs.sc.mult"
         maintenance_proceeds: "legs.sc.P  * legs.sc.qty * legs.sc.mult"
 
