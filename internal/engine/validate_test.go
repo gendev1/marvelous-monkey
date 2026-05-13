@@ -436,13 +436,13 @@ rules:
 	assertRulebookError(t, err, "name is empty")
 }
 
-// A formula whose CEL output is bool/string/null silently became 0 under the
-// old asFloat path. celNumber must now surface that as an error at eval time.
-// Using `1 == 1` instead of the literal `true` so the failure is unambiguously
-// an eval-time type mismatch, not a compile-time identifier lookup miss.
-func TestEvaluate_nonNumericFormulaFails(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "rules.yaml")
-	yaml := `
+// A formula whose CEL output is bool/string/null used to compile cleanly and
+// fail only at Evaluate time via the celNumber guard. The assertion has been
+// moved to load: LoadRulebook now rejects with "formula must return a number"
+// and the wrapping "invalid rulebook" / formula-label context so the rule and
+// formula key are pinpointed in the error chain.
+func TestLoadRulebook_nonNumericFormulaFails(t *testing.T) {
+	err := loadRulebookFromYAML(t, `
 schema_version: "1"
 rates:
   equity: { base_pct: 0.20, min_pct: 0.10 }
@@ -455,26 +455,144 @@ rules:
       margin:
         initial:     "1 == 1"
         maintenance: "0.0"
-`
-	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
-		t.Fatalf("write temp rulebook: %v", err)
+`)
+	assertRulebookError(t, err, "formula must return a number")
+	if !strings.Contains(err.Error(), "margin.initial") {
+		t.Fatalf("error %q lacks formula label 'margin.initial'", err.Error())
 	}
-	rb, err := LoadRulebook(path)
+}
+
+// A string-typed formula is the other shape that used to slip through compile
+// and fail only at celNumber. Asserted at load now.
+func TestLoadRulebook_stringFormulaFails(t *testing.T) {
+	err := loadRulebookFromYAML(t, `
+schema_version: "1"
+rates:
+  equity: { base_pct: 0.20, min_pct: 0.10 }
+rules:
+  - id: str_formula
+    match:
+      legs:
+        - { name: a, side: long, kind: option }
+    formulas:
+      margin:
+        initial:     "'hi'"
+        maintenance: "0.0"
+`)
+	assertRulebookError(t, err, "formula must return a number")
+}
+
+// Double-typed formulas (the common case) must continue to load cleanly.
+func TestLoadRulebook_doubleFormulaLoads(t *testing.T) {
+	err := loadRulebookFromYAML(t, `
+schema_version: "1"
+rates:
+  equity: { base_pct: 0.20, min_pct: 0.10 }
+rules:
+  - id: dbl_formula
+    match:
+      legs:
+        - { name: a, side: long, kind: option }
+    formulas:
+      margin:
+        initial:     "0.25 * legs.a.K"
+        maintenance: "0.0"
+`)
 	if err != nil {
-		t.Fatalf("LoadRulebook: %v", err)
+		t.Fatalf("expected nil error, got %v", err)
 	}
-	pos := Position{
-		U: 100.0, Class: "equity",
-		Legs: []Leg{
-			{Side: Long, Kind: OptionKind, OptionType: "call",
-				K: 100, P: 1.0, P0: 1.0, Qty: 1, Mult: 100},
-		},
+}
+
+// Int-typed formulas must load: CEL Int is one of the accepted numeric output
+// types, and celNumber handles the runtime conversion to float64.
+func TestLoadRulebook_intFormulaLoads(t *testing.T) {
+	err := loadRulebookFromYAML(t, `
+schema_version: "1"
+rates:
+  equity: { base_pct: 0.20, min_pct: 0.10 }
+rules:
+  - id: int_formula
+    match:
+      legs:
+        - { name: a, side: long, kind: option }
+    formulas:
+      margin:
+        initial:     "42"
+        maintenance: "0.0"
+`)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
 	}
-	_, err = rb.Evaluate(pos, MarginAccount, Initial)
-	if err == nil {
-		t.Fatal("expected error for non-numeric formula, got nil")
+}
+
+// long_box_spread-shaped conditional: both branches return Double but cel-go's
+// checker is sometimes conservative through conditionals and may report
+// DynType. The lenient allowlist must accept this shape — defense-in-depth
+// at eval time is still provided by celNumber.
+func TestLoadRulebook_dynConditionalFormulaLoads(t *testing.T) {
+	err := loadRulebookFromYAML(t, `
+schema_version: "1"
+rates:
+  equity: { base_pct: 0.20, min_pct: 0.10 }
+rules:
+  - id: cond_formula
+    match:
+      legs_pattern: all_options
+      min_legs: 2
+    formulas:
+      margin:
+        initial:     "legs.size() > 0 ? 0.50 * U : mpl(legs) + 0.0"
+        maintenance: "0.0"
+`)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "formula must return a number") {
-		t.Fatalf("error %q lacks expected substring 'formula must return a number'", err.Error())
+}
+
+// A permitted:false rule with empty initial/maintenance must keep loading.
+// The empty-expr skip at rulebook.go:114 means the new assertion never sees
+// an empty string and never spuriously rejects.
+func TestLoadRulebook_permittedFalseEmptyFormulasLoad(t *testing.T) {
+	err := loadRulebookFromYAML(t, `
+schema_version: "1"
+rates:
+  equity: { base_pct: 0.20, min_pct: 0.10 }
+rules:
+  - id: not_permitted
+    match:
+      legs:
+        - { name: a, side: long, kind: option }
+    formulas:
+      cash:
+        permitted: false
+`)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+}
+
+// A constraint that returns a non-bool (e.g. `1 + 1`) must NOT be rejected at
+// load in this issue — constraint-bool assertion is the sibling issue's scope.
+// This proves the kind discriminator is wired and not over-eager. The sibling
+// issue will flip this expectation.
+func TestLoadRulebook_nonBoolConstraintNotYetRejected(t *testing.T) {
+	err := loadRulebookFromYAML(t, `
+schema_version: "1"
+rates:
+  equity: { base_pct: 0.20, min_pct: 0.10 }
+rules:
+  - id: int_constraint
+    match:
+      legs:
+        - { name: a, side: long, kind: option }
+      constraints:
+        - "1 + 1"
+    formulas:
+      margin:
+        initial:     "0.0"
+        maintenance: "0.0"
+`)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
 	}
 }
