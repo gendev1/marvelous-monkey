@@ -3,12 +3,24 @@ package engine
 import (
 	"fmt"
 	"math"
+	"reflect"
 
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
 	"github.com/google/cel-go/common/types/traits"
+	"github.com/google/cel-go/ext"
 )
+
+// legObjectTypeName is the cel-go-derived ObjectType string for engine.Leg.
+// cel-go composes it as `simplePkgAlias(reflect.Type.PkgPath()) + "." + Name()`
+// (see ext/native.go: convertToCelType, simplePkgAlias), so for the module path
+// `margincalc/internal/engine` the result is `engine.Leg`. If this package is
+// renamed or moved (e.g. promoted to `pkg/margincalc/`), LoadRulebook will fail
+// at startup because the variable declaration below won't match the registered
+// type — update this constant and the moved-package's ObjectType in lockstep.
+// See issue #5.
+const legObjectTypeName = "engine.Leg"
 
 // buildEnv constructs a CEL environment exposing the variables and custom
 // functions referenced by the rules YAML. The rates table is captured so
@@ -18,10 +30,20 @@ import (
 // (e.g. `constants.long_option_loan_value_threshold_months`) instead of
 // hard-coding magic numbers.
 func buildEnv(rates map[string]map[string]float64) (*cel.Env, error) {
-	legType := cel.MapType(cel.StringType, cel.DynType)
+	// Register engine.Leg as a CEL native type so typoed field accesses
+	// (e.g. legs.opt.kk) are rejected at compile time rather than silently
+	// reading as a zero-valued dyn at runtime. Field names are taken from
+	// the `json:` struct tags on Leg, which already match every formula in
+	// rules/*.yaml. The activation in evaluateOne (rulebook.go) passes Leg
+	// structs directly so cel-go's reflective field access lands on the
+	// real struct, not a map[string]any (which would panic with
+	// "FieldByName on map Value"). Helpers below cast to traits.Indexer —
+	// nativeObj implements Get but not the full traits.Mapper interface.
+	legType := cel.ObjectType(legObjectTypeName)
 	legsType := cel.MapType(cel.StringType, legType)
 
 	return cel.NewEnv(
+		ext.NativeTypes(reflect.TypeOf(Leg{}), ext.ParseStructTag("json")),
 		// --- variables ---
 		cel.Variable("U", cel.DoubleType),
 		cel.Variable("class", cel.StringType),
@@ -84,14 +106,14 @@ func buildEnv(rates map[string]map[string]float64) (*cel.Env, error) {
 				[]*cel.Type{legType, cel.DoubleType, cel.StringType, cel.DoubleType, cel.DoubleType},
 				cel.DoubleType,
 				cel.FunctionBinding(func(args ...ref.Val) ref.Val {
-					return shortOptionReq(rates, args, /*isCall=*/ true)
+					return shortOptionReq(rates, args /*isCall=*/, true)
 				}))),
 		cel.Function("short_put_req",
 			cel.Overload("short_put_req_overload",
 				[]*cel.Type{legType, cel.DoubleType, cel.StringType, cel.DoubleType, cel.DoubleType},
 				cel.DoubleType,
 				cel.FunctionBinding(func(args ...ref.Val) ref.Val {
-					return shortOptionReq(rates, args, /*isCall=*/ false)
+					return shortOptionReq(rates, args /*isCall=*/, false)
 				}))),
 
 		// --- mpl(legs) → double ---
@@ -137,7 +159,9 @@ func buildEnv(rates map[string]map[string]float64) (*cel.Env, error) {
 // short option. args = [leg, U, class, lev, p]. Returns a CEL error if the
 // class is unknown — silently zeroing here previously masked typos in `class`.
 func shortOptionReq(rates map[string]map[string]float64, args []ref.Val, isCall bool) ref.Val {
-	leg := args[0].(traits.Mapper)
+	// args[0] is a single Leg value. Under the NativeTypes registration the
+	// wrapped value implements traits.Indexer (Get) but not traits.Mapper.
+	leg := args[0].(traits.Indexer)
 	U := asFloat(args[1])
 	cls := asString(args[2])
 	lev := asFloat(args[3])
@@ -184,12 +208,14 @@ type legView struct {
 // raw mapper is passed alongside the projection so callers that need extra
 // fields (e.g. a custom premium field name) don't have to re-implement
 // iteration. If fn returns false, iteration stops early.
-func forEachLeg(legsVal ref.Val, fn func(legView, traits.Mapper) bool) {
+func forEachLeg(legsVal ref.Val, fn func(legView, traits.Indexer) bool) {
 	legsMap := legsVal.(traits.Mapper)
 	it := legsMap.Iterator()
 	for it.HasNext() == types.Bool(true) {
 		k := it.Next()
-		legM, ok := legsMap.Get(k).(traits.Mapper)
+		// Each map value is a reflectively-wrapped Leg (traits.Indexer) under
+		// the NativeTypes registration; not a full traits.Mapper.
+		legM, ok := legsMap.Get(k).(traits.Indexer)
 		if !ok {
 			continue
 		}
@@ -215,7 +241,7 @@ func forEachLeg(legsVal ref.Val, fn func(legView, traits.Mapper) bool) {
 // occurs at the floor of the underlying's domain, not at any strike.
 func maxPotentialLoss(legsVal ref.Val) float64 {
 	var opts []legView
-	forEachLeg(legsVal, func(l legView, _ traits.Mapper) bool {
+	forEachLeg(legsVal, func(l legView, _ traits.Indexer) bool {
 		if l.kind == "option" {
 			opts = append(opts, l)
 		}
@@ -274,7 +300,7 @@ func payoffAt(opts []legView, U float64) float64 {
 func isLimitedRisk(legsVal ref.Val) bool {
 	netCallExposure := 0.0
 	limited := true
-	forEachLeg(legsVal, func(l legView, _ traits.Mapper) bool {
+	forEachLeg(legsVal, func(l legView, _ traits.Indexer) bool {
 		if l.kind != "option" {
 			limited = false
 			return false // short-circuit
@@ -293,7 +319,7 @@ func isLimitedRisk(legsVal ref.Val) bool {
 
 func sumPremiums(legsVal ref.Val, field string, side Side) float64 {
 	total := 0.0
-	forEachLeg(legsVal, func(l legView, legM traits.Mapper) bool {
+	forEachLeg(legsVal, func(l legView, legM traits.Indexer) bool {
 		if l.kind != "option" || l.side != side {
 			return true
 		}
@@ -350,12 +376,14 @@ func asString(v ref.Val) string {
 	return fmt.Sprintf("%v", v.Value())
 }
 
-func mapFloat(m traits.Mapper, key string) float64 {
+// mapFloat / mapString read a string-keyed value from either a CEL map or a
+// reflectively-wrapped native struct: both implement traits.Indexer.Get.
+func mapFloat(m traits.Indexer, key string) float64 {
 	v := m.Get(types.String(key))
 	return asFloat(v)
 }
 
-func mapString(m traits.Mapper, key string) string {
+func mapString(m traits.Indexer, key string) string {
 	v := m.Get(types.String(key))
 	return asString(v)
 }
