@@ -101,15 +101,18 @@ func TestValidate_rejectsDuplicatePositionIDs(t *testing.T) {
 	dup.ID = "p1"
 	a.Positions = append(a.Positions, dup)
 	assertInvalidAccount(t, validate(a))
+}
+
+func TestValidate_rejectsEmptyPositionID(t *testing.T) {
+	a := minimalAccount()
+	a.Positions[0].ID = ""
+	assertInvalidAccount(t, validate(a))
 
 	a2 := minimalAccount()
-	a2.Positions[0].ID = ""
 	empty := longStockPosition()
 	empty.ID = ""
 	a2.Positions = append(a2.Positions, empty)
-	if err := validate(a2); err != nil {
-		t.Fatalf("two empty position IDs should pass, got %v", err)
-	}
+	assertInvalidAccount(t, validate(a2))
 }
 
 func optionPosition(p, qty float64) AccountPosition {
