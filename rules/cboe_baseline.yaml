@@ -67,6 +67,9 @@ rules:
         - { name: opt, side: long, kind: option }
       constraints:
         - "legs.opt.time_to_expiration_months <= constants.long_option_loan_value_threshold_months"
+    requires:
+      positive_fields:
+        opt: [time_to_expiration_months]
     formulas:
       cash:
         initial:     "legs.opt.P0 * legs.opt.qty * legs.opt.mult"
@@ -88,6 +91,9 @@ rules:
         # therefore falls through this rule and produces a no-match error,
         # which is the correct outcome until a specific ETN rule is authored.
         - "class in ['equity', 'etf_narrow', 'etf_broad', 'narrow_based_index', 'broad_based_index', 'vol_index_narrow', 'vol_index_broad']"
+    requires:
+      positive_fields:
+        opt: [time_to_expiration_months]
     formulas:
       cash:
         initial:     "legs.opt.P0 * legs.opt.qty * legs.opt.mult"
@@ -105,6 +111,9 @@ rules:
         - "legs.opt.time_to_expiration_months > constants.long_option_loan_value_threshold_months"
         - "legs.opt.style == 'american'"
         - "legs.opt.broker_guaranteed == true"
+    requires:
+      positive_fields:
+        opt: [time_to_expiration_months]
     formulas:
       cash:
         initial:     "legs.opt.P0 * legs.opt.qty * legs.opt.mult"
@@ -208,6 +217,12 @@ rules:
       constraints:
         - "legs.sp.underlying == legs.sc.underlying"
         - "legs.sp.mult == legs.sc.mult"
+    requires:
+      required_fields:
+        sp: [underlying]
+        sc: [underlying]
+      same_across_slots:
+        - { field: underlying, slots: [sp, sc] }
     formulas:
       cash:
         # An uncovered short straddle/strangle cannot be cash-secured by a
@@ -247,6 +262,15 @@ rules:
         - "legs.long_leg.venue == legs.short_leg.venue"
         - "legs.short_leg.expiration <= legs.long_leg.expiration"
         - "legs.long_leg.qty * legs.long_leg.mult == legs.short_leg.qty * legs.short_leg.mult"
+    requires:
+      required_fields:
+        long_leg:  [underlying, style, venue]
+        short_leg: [underlying, style, venue]
+      same_across_slots:
+        - { field: underlying, slots: [long_leg, short_leg] }
+        - { field: style,      slots: [long_leg, short_leg] }
+        - { field: venue,      slots: [long_leg, short_leg] }
+      expiration_slots: [long_leg, short_leg]
     formulas:
       cash:
         # Cash-secured vertical: max loss on deposit + long premium paid.
@@ -369,6 +393,9 @@ rules:
       legs:
         - { name: sp, side: short, kind: option, option_type: put }
         - { name: ss, side: short, kind: stock }
+    requires:
+      positive_fields:
+        ss: [short_sale_proceeds]
     formulas:
       cash:
         permitted: false
@@ -392,6 +419,14 @@ rules:
       legs:
         - { name: sc, side: short, kind: option, option_type: call }
         - { name: ls, side: long,  kind: stock }
+    requires:
+      required_fields:
+        sc: [underlying]
+        ls: [underlying]
+      same_across_slots:
+        - { field: underlying, slots: [sc, ls] }
+      min_fields:
+        - { slot: ls, field: shares, gte: "legs.sc.qty * legs.sc.mult" }
     formulas:
       cash:
         initial:     "U * legs.ls.shares"
@@ -412,6 +447,12 @@ rules:
         - "legs.le.tracks_index == legs.sc.underlying"
         - "legs.le.shares * legs.le.price >= U * legs.sc.qty * legs.sc.mult"
         - "legs.le.leveraged == false"
+    requires:
+      required_fields:
+        sc: [underlying]
+        le: [tracks_index]
+      positive_fields:
+        le: [price, K_equivalent]
     formulas:
       cash:
         permitted: false
@@ -429,6 +470,9 @@ rules:
         - { name: ls, side: long, kind: stock }
       constraints:
         - "legs.lp.style == 'american'"
+    requires:
+      required_fields:
+        lp: [style]
     formulas:
       cash:
         initial:     "U * legs.ls.shares + legs.lp.P0 * legs.lp.qty * legs.lp.mult"
@@ -449,6 +493,11 @@ rules:
         - { name: ss, side: short, kind: stock }
       constraints:
         - "legs.lc.style == 'american'"
+    requires:
+      required_fields:
+        lc: [style]
+      positive_fields:
+        ss: [short_sale_proceeds]
     formulas:
       cash:
         permitted: false

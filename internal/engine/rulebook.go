@@ -43,32 +43,74 @@ type RuleFormulas struct {
 	Margin FormulaBlock `yaml:"margin,omitempty"`
 }
 
-// AllSlotsRequirements expresses preconditions over the *entire* bound leg set,
-// not a named slot. It only applies to rules whose match uses
-// `legs_pattern: all_options`, where the bound set has unbounded size and
-// constraints addressed by name (legs.a, legs.b, ...) cannot iterate it.
-type AllSlotsRequirements struct {
-	// RequiredFields: every leg in `bound` must have a non-empty value for each
-	// listed string field (e.g. ["underlying"]).
-	RequiredFields []string `yaml:"required_fields,omitempty"`
-	// SameField: every leg in `bound` must agree on the value of this string
-	// field. Blank values are rejected — `==` on two blank strings would
-	// otherwise silently pass on under-specified input.
-	SameField string `yaml:"same_field,omitempty"`
-}
-
-// Requirements is the post-match precondition block. Each sub-block targets a
-// different shape of bound set; today only `all_slots` exists.
-type Requirements struct {
-	AllSlots *AllSlotsRequirements `yaml:"all_slots,omitempty"`
-}
-
 type Rule struct {
-	ID       string        `yaml:"id"`
-	Match    MatchSpec     `yaml:"match"`
-	Requires *Requirements `yaml:"requires,omitempty"`
-	Formulas RuleFormulas  `yaml:"formulas"`
+	ID       string       `yaml:"id"`
+	Match    MatchSpec    `yaml:"match"`
+	Requires RequireSpec  `yaml:"requires,omitempty"`
+	Formulas RuleFormulas `yaml:"formulas"`
 }
+
+// RequireSpec is the declarative pre-formula validation block. Each rule may
+// declare which slot/field combinations must be present, positive, equal across
+// slots, or above a CEL-expressed lower bound. The schema is structurally
+// validated at load time (see validateRequires); a future issue wires a runtime
+// interpreter that produces "invalid position:" errors before formula eval.
+type RequireSpec struct {
+	RequiredFields   map[string][]string   `yaml:"required_fields,omitempty"`
+	PositiveFields   map[string][]string   `yaml:"positive_fields,omitempty"`
+	ExpirationSlots  []string              `yaml:"expiration_slots,omitempty"`
+	SameAcrossSlots  []SameAcrossSlotsSpec `yaml:"same_across_slots,omitempty"`
+	SameContractSize [][]string            `yaml:"same_contract_size,omitempty"`
+	MinFields        []MinFieldSpec        `yaml:"min_fields,omitempty"`
+	AllSlots         *AllSlotsSpec         `yaml:"all_slots,omitempty"`
+}
+
+type SameAcrossSlotsSpec struct {
+	Field string   `yaml:"field"`
+	Slots []string `yaml:"slots"`
+}
+
+// MinFieldSpec asserts legs.<slot>.<field> >= <gte>. GTE compiles against the
+// same CEL environment as match.constraints — legs/U/class/lev/constants are
+// in scope. The load-time validator only checks that it parses to a numeric
+// type; runtime-type assertions on the bound value live in the future
+// interpreter.
+type MinFieldSpec struct {
+	Slot  string `yaml:"slot"`
+	Field string `yaml:"field"`
+	GTE   string `yaml:"gte"`
+}
+
+// AllSlotsSpec is the only requires shape valid under legs_pattern: all_options.
+// Slots aren't named there, so checks apply to every bound leg.
+type AllSlotsSpec struct {
+	RequiredFields []string `yaml:"required_fields,omitempty"`
+	SameField      string   `yaml:"same_field,omitempty"`
+}
+
+// Closed whitelists shared between the load-time validator and (issue 2) the
+// runtime interpreter. Kept package-level so the field accessor work in the
+// next issue can reuse the exact same sets without re-deriving them.
+var (
+	requireStringFields = map[string]struct{}{
+		"underlying":   {},
+		"style":        {},
+		"venue":        {},
+		"settle_style": {},
+		"tracks_index": {},
+	}
+	requireNumericFields = map[string]struct{}{
+		"qty":                       {},
+		"mult":                      {},
+		"K":                         {},
+		"price":                     {},
+		"time_to_expiration_months": {},
+		"shares":                    {},
+		"short_sale_proceeds":       {},
+		"sale_price":                {},
+		"K_equivalent":              {},
+	}
+)
 
 type rawRulebook struct {
 	SchemaVersion string                        `yaml:"schema_version"`
@@ -130,6 +172,14 @@ func LoadRulebook(path string) (*Rulebook, error) {
 		for _, c := range r.Match.Constraints {
 			if _, err := rb.compile(r.ID+"/c:"+c, c, kindConstraint); err != nil {
 				return nil, fmt.Errorf("invalid rulebook: rule %s constraint %q: %w", r.ID, c, err)
+			}
+		}
+		for _, mf := range r.Requires.MinFields {
+			// Include the gte expression in the key so two entries sharing
+			// (slot, field) but differing on gte don't collide in rb.progs.
+			key := r.ID + "/req:gte:" + mf.Slot + "." + mf.Field + ":" + mf.GTE
+			if _, err := rb.compile(key, mf.GTE, kindFormula); err != nil {
+				return nil, fmt.Errorf("invalid rulebook: rule %s min_fields legs.%s.%s gte %q: %w", r.ID, mf.Slot, mf.Field, mf.GTE, err)
 			}
 		}
 		// Sort labels so error wrapping is deterministic when multiple
@@ -415,36 +465,154 @@ func validateRule(r Rule) error {
 			return err
 		}
 	}
+	if err := validateRequires(r); err != nil {
+		return err
+	}
 	if !hasAnyOutput(r) {
 		return fmt.Errorf("invalid rulebook: rule %q has no formula, permitted, or deposit_kind in either cash or margin block", r.ID)
-	}
-	if err := validateRequiresSpec(r); err != nil {
-		return err
 	}
 	return nil
 }
 
-// validateRequiresSpec checks the `requires:` block at load. `all_slots` is
-// only meaningful when the matcher returns an unbounded bound set, so it is
-// restricted to `legs_pattern: all_options` rules. Each named field must be a
-// known string field — the runtime path reads them through legStringField, and
-// catching typos at load avoids a confusing "unknown string field" surfacing
-// only when a fixture happens to trigger the rule.
-func validateRequiresSpec(r Rule) error {
-	if r.Requires == nil || r.Requires.AllSlots == nil {
+// validateRequires structurally checks rule.Requires against the rule's slot
+// declarations and the closed field whitelist. CEL compilation of min_fields
+// gte expressions happens in LoadRulebook after the env exists; this function
+// only checks shape so it can run before env build.
+//
+// Note on gte return-type checking: we assert numeric output via the existing
+// kindFormula compile path. A gte that parses but returns a non-numeric type
+// is rejected here. Runtime-type assertions on the *bound value* of legs.x.f
+// are out of scope for this issue (defer to the interpreter in #34).
+func validateRequires(r Rule) error {
+	spec := r.Requires
+	isAll := r.Match.LegsPattern == "all_options"
+
+	slotNames := map[string]struct{}{}
+	for _, s := range r.Match.Legs {
+		slotNames[s.Name] = struct{}{}
+	}
+
+	checkSlot := func(where, slot string) error {
+		if isAll {
+			return fmt.Errorf("invalid rulebook: rule %q requires.%s references slot %q but legs_pattern is all_options (use all_slots)", r.ID, where, slot)
+		}
+		if _, ok := slotNames[slot]; !ok {
+			return fmt.Errorf("invalid rulebook: rule %q requires.%s references unknown slot %q", r.ID, where, slot)
+		}
 		return nil
 	}
-	if r.Match.LegsPattern != "all_options" {
-		return fmt.Errorf("invalid rulebook: rule %q requires.all_slots is only valid with legs_pattern: all_options", r.ID)
+
+	checkField := func(where, field, expected string) error {
+		_, isStr := requireStringFields[field]
+		_, isNum := requireNumericFields[field]
+		switch expected {
+		case "string":
+			if !isStr {
+				if isNum {
+					return fmt.Errorf("invalid rulebook: rule %q requires.%s field %q is numeric, expected a string field", r.ID, where, field)
+				}
+				return fmt.Errorf("invalid rulebook: rule %q requires.%s field %q is not a known string field", r.ID, where, field)
+			}
+		case "numeric":
+			if !isNum {
+				if isStr {
+					return fmt.Errorf("invalid rulebook: rule %q requires.%s field %q is a string field, expected a numeric field", r.ID, where, field)
+				}
+				return fmt.Errorf("invalid rulebook: rule %q requires.%s field %q is not a known numeric field", r.ID, where, field)
+			}
+		case "any":
+			if !isStr && !isNum {
+				return fmt.Errorf("invalid rulebook: rule %q requires.%s field %q is not a known leg field", r.ID, where, field)
+			}
+		}
+		return nil
 	}
-	for _, field := range r.Requires.AllSlots.RequiredFields {
-		if !isLegStringField(field) {
-			return fmt.Errorf("invalid rulebook: rule %q requires.all_slots.required_fields contains unknown string field %q", r.ID, field)
+
+	if spec.AllSlots != nil && !isAll {
+		return fmt.Errorf("invalid rulebook: rule %q has requires.all_slots but legs_pattern is not all_options", r.ID)
+	}
+
+	for slot, fields := range spec.RequiredFields {
+		if err := checkSlot("required_fields", slot); err != nil {
+			return err
+		}
+		for _, f := range fields {
+			if err := checkField("required_fields", f, "any"); err != nil {
+				return err
+			}
 		}
 	}
-	if f := r.Requires.AllSlots.SameField; f != "" && !isLegStringField(f) {
-		return fmt.Errorf("invalid rulebook: rule %q requires.all_slots.same_field %q is not a known string field", r.ID, f)
+
+	for slot, fields := range spec.PositiveFields {
+		if err := checkSlot("positive_fields", slot); err != nil {
+			return err
+		}
+		for _, f := range fields {
+			if err := checkField("positive_fields", f, "numeric"); err != nil {
+				return err
+			}
+		}
 	}
+
+	for _, slot := range spec.ExpirationSlots {
+		if err := checkSlot("expiration_slots", slot); err != nil {
+			return err
+		}
+	}
+
+	for _, sa := range spec.SameAcrossSlots {
+		if sa.Field == "" {
+			return fmt.Errorf("invalid rulebook: rule %q same_across_slots entry has empty field", r.ID)
+		}
+		if err := checkField("same_across_slots", sa.Field, "string"); err != nil {
+			return err
+		}
+		if len(sa.Slots) < 2 {
+			return fmt.Errorf("invalid rulebook: rule %q same_across_slots field %q requires at least two slots, got %d", r.ID, sa.Field, len(sa.Slots))
+		}
+		for _, s := range sa.Slots {
+			if err := checkSlot("same_across_slots", s); err != nil {
+				return err
+			}
+		}
+	}
+
+	for i, group := range spec.SameContractSize {
+		if len(group) < 2 {
+			return fmt.Errorf("invalid rulebook: rule %q same_contract_size group %d requires at least two slots, got %d", r.ID, i, len(group))
+		}
+		for _, s := range group {
+			if err := checkSlot("same_contract_size", s); err != nil {
+				return err
+			}
+		}
+	}
+
+	for _, mf := range spec.MinFields {
+		if err := checkSlot("min_fields", mf.Slot); err != nil {
+			return err
+		}
+		if err := checkField("min_fields", mf.Field, "numeric"); err != nil {
+			return err
+		}
+		if mf.GTE == "" {
+			return fmt.Errorf("invalid rulebook: rule %q min_fields entry for legs.%s.%s has empty gte", r.ID, mf.Slot, mf.Field)
+		}
+	}
+
+	if spec.AllSlots != nil {
+		for _, f := range spec.AllSlots.RequiredFields {
+			if err := checkField("all_slots.required_fields", f, "any"); err != nil {
+				return err
+			}
+		}
+		if spec.AllSlots.SameField != "" {
+			if err := checkField("all_slots.same_field", spec.AllSlots.SameField, "string"); err != nil {
+				return err
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -518,21 +686,6 @@ func hasAnyOutput(r Rule) bool {
 // note for the rejected migration to CEL constraints.
 func validateRuleInputs(ruleID string, bound map[string]Leg) error {
 	switch ruleID {
-	case "long_option_short_dated", "long_option_long_dated_listed", "long_option_long_dated_otc":
-		return requirePositive(ruleID, "opt", "time_to_expiration_months", bound["opt"].TimeToExpirationMonths)
-	case "short_strangle_or_straddle":
-		return requireSameUnderlying(ruleID, bound, "sp", "sc")
-	case "vertical_spread":
-		if err := requireSameUnderlying(ruleID, bound, "long_leg", "short_leg"); err != nil {
-			return err
-		}
-		if err := requireSameStringField(ruleID, bound, "style", "long_leg", "short_leg"); err != nil {
-			return err
-		}
-		if err := requireSameStringField(ruleID, bound, "venue", "long_leg", "short_leg"); err != nil {
-			return err
-		}
-		return requireExpirationSlots(ruleID, bound, "long_leg", "short_leg")
 	case "long_box_spread":
 		if err := requireExpirationSlots(ruleID, bound, "bc", "bp", "sp", "sc"); err != nil {
 			return err
@@ -555,34 +708,6 @@ func validateRuleInputs(ruleID string, bound map[string]Leg) error {
 			return err
 		}
 		return requireSameContractSize(ruleID, bound, "bc", "bp", "sp", "sc")
-	case "short_put_short_stock":
-		return requirePositive(ruleID, "ss", "short_sale_proceeds", bound["ss"].ShortSaleProceeds)
-	case "short_index_call_long_etf":
-		if err := requireNonEmpty(ruleID, "sc", "underlying", bound["sc"].Underlying); err != nil {
-			return err
-		}
-		if err := requireNonEmpty(ruleID, "le", "tracks_index", bound["le"].TracksIndex); err != nil {
-			return err
-		}
-		if err := requirePositive(ruleID, "le", "price", bound["le"].Price); err != nil {
-			return err
-		}
-		return requirePositive(ruleID, "le", "K_equivalent", bound["le"].KEquivalent)
-	case "covered_call":
-		if err := requireSameUnderlying(ruleID, bound, "sc", "ls"); err != nil {
-			return err
-		}
-		if bound["ls"].Shares < bound["sc"].Qty*bound["sc"].Mult {
-			return fmt.Errorf("invalid position: rule %s requires legs.ls.shares >= legs.sc.qty * legs.sc.mult", ruleID)
-		}
-		return nil
-	case "protective_put":
-		return requireNonEmpty(ruleID, "lp", "style", bound["lp"].Style)
-	case "long_call_short_stock":
-		if err := requireNonEmpty(ruleID, "lc", "style", bound["lc"].Style); err != nil {
-			return err
-		}
-		return requirePositive(ruleID, "ss", "short_sale_proceeds", bound["ss"].ShortSaleProceeds)
 	case "conversion":
 		if err := requireSameUnderlying(ruleID, bound, "lp", "sc"); err != nil {
 			return err
@@ -696,72 +821,230 @@ func legStringField(l Leg, field string) (string, error) {
 		return l.Style, nil
 	case "venue":
 		return l.Venue, nil
+	case "settle_style":
+		return l.SettleStyle, nil
+	case "tracks_index":
+		return l.TracksIndex, nil
 	default:
 		return "", fmt.Errorf("invalid position: unknown string field %q", field)
 	}
 }
 
-func isLegStringField(field string) bool {
+// legNumberField mirrors legStringField for the numeric whitelist shared with
+// the requires schema validator. Unknown fields surface as "invalid position:"
+// — load-time validation should have rejected the rulebook before we get here,
+// so reaching this branch means a code/whitelist drift.
+func legNumberField(l Leg, field string) (float64, error) {
 	switch field {
-	case "underlying", "style", "venue":
-		return true
+	case "qty":
+		return l.Qty, nil
+	case "mult":
+		return l.Mult, nil
+	case "K":
+		return l.K, nil
+	case "price":
+		return l.Price, nil
+	case "time_to_expiration_months":
+		return l.TimeToExpirationMonths, nil
+	case "shares":
+		return l.Shares, nil
+	case "short_sale_proceeds":
+		return l.ShortSaleProceeds, nil
+	case "sale_price":
+		return l.SalePrice, nil
+	case "K_equivalent":
+		return l.KEquivalent, nil
+	default:
+		return 0, fmt.Errorf("invalid position: unknown numeric field %q", field)
 	}
-	return false
 }
 
-// validateRequirements runs the rule's `requires:` block against the bound leg
-// set after match + constraints, before formulas. Errors use the
-// "invalid position:" prefix so recon's classifier keeps treating them as
-// validation failures, not no-match outcomes.
-//
-// Slot iteration is on sorted keys so error messages are deterministic across
-// runs (Go map iteration is randomized).
-func validateRequirements(ruleID string, spec *Requirements, bound map[string]Leg) error {
-	if spec == nil || spec.AllSlots == nil {
-		return nil
+// fieldIsPresent reports whether `field` on l has a usable value. "Present"
+// matches requirePositive's zero-as-missing convention so the requires
+// interpreter and the legacy Go validators agree on what blank means: a
+// numeric field is present iff finite and non-zero; a string field is present
+// iff non-empty. Unknown fields error.
+func fieldIsPresent(l Leg, field string) (bool, error) {
+	if _, ok := requireStringFields[field]; ok {
+		v, err := legStringField(l, field)
+		if err != nil {
+			return false, err
+		}
+		return v != "", nil
 	}
-	if len(bound) == 0 {
-		// Defensive: an all_options match should always produce non-empty
-		// `bound`. Nothing to check if it didn't.
-		return nil
+	if _, ok := requireNumericFields[field]; ok {
+		v, err := legNumberField(l, field)
+		if err != nil {
+			return false, err
+		}
+		return isFinite(v) && v != 0, nil
 	}
-	slots := make([]string, 0, len(bound))
-	for s := range bound {
-		slots = append(slots, s)
-	}
-	sort.Strings(slots)
+	return false, fmt.Errorf("invalid position: unknown leg field %q", field)
+}
 
-	for _, field := range spec.AllSlots.RequiredFields {
-		for _, slot := range slots {
-			value, err := legStringField(bound[slot], field)
+// validateRequirements is the runtime interpreter for RequireSpec. It runs
+// before validateRuleInputs in evaluateOne and produces the same
+// "invalid position:" error prefix so callers cannot distinguish the two
+// validation paths by error shape. Read-only on bound and activation —
+// Rulebook is concurrent-safe and the interpreter must not mutate either.
+func (rb *Rulebook) validateRequirements(ruleID string, spec RequireSpec, bound map[string]Leg, activation map[string]any) error {
+	checkSlotBound := func(slot string) error {
+		if _, ok := bound[slot]; !ok {
+			return fmt.Errorf("invalid rulebook: rule %s requires slot %q not present in bound legs", ruleID, slot)
+		}
+		return nil
+	}
+
+	for _, slot := range sortedStringKeys(spec.RequiredFields) {
+		if err := checkSlotBound(slot); err != nil {
+			return err
+		}
+		leg := bound[slot]
+		for _, field := range spec.RequiredFields[slot] {
+			present, err := fieldIsPresent(leg, field)
 			if err != nil {
 				return err
 			}
-			if value == "" {
+			if !present {
 				return fmt.Errorf("invalid position: rule %s requires legs.%s.%s", ruleID, slot, field)
 			}
 		}
 	}
-	if field := spec.AllSlots.SameField; field != "" {
-		var want string
-		for _, slot := range slots {
-			value, err := legStringField(bound[slot], field)
+
+	for _, slot := range sortedStringKeys(spec.PositiveFields) {
+		if err := checkSlotBound(slot); err != nil {
+			return err
+		}
+		leg := bound[slot]
+		for _, field := range spec.PositiveFields[slot] {
+			v, err := legNumberField(leg, field)
 			if err != nil {
 				return err
 			}
-			if value == "" {
-				return fmt.Errorf("invalid position: rule %s requires legs.%s.%s", ruleID, slot, field)
-			}
-			if want == "" {
-				want = value
-				continue
-			}
-			if value != want {
-				return fmt.Errorf("invalid position: rule %s requires one %s for mpl(legs), got %q and %q", ruleID, field, want, value)
+			if err := requirePositive(ruleID, slot, field, v); err != nil {
+				return err
 			}
 		}
 	}
+
+	if len(spec.ExpirationSlots) > 0 {
+		for _, slot := range spec.ExpirationSlots {
+			if err := checkSlotBound(slot); err != nil {
+				return err
+			}
+		}
+		if err := requireExpirationSlots(ruleID, bound, spec.ExpirationSlots...); err != nil {
+			return err
+		}
+	}
+
+	for _, sa := range spec.SameAcrossSlots {
+		for _, slot := range sa.Slots {
+			if err := checkSlotBound(slot); err != nil {
+				return err
+			}
+		}
+		if err := requireSameStringField(ruleID, bound, sa.Field, sa.Slots...); err != nil {
+			return err
+		}
+	}
+
+	for _, group := range spec.SameContractSize {
+		for _, slot := range group {
+			if err := checkSlotBound(slot); err != nil {
+				return err
+			}
+		}
+		if err := requireSameContractSize(ruleID, bound, group...); err != nil {
+			return err
+		}
+	}
+
+	for _, mf := range spec.MinFields {
+		if err := checkSlotBound(mf.Slot); err != nil {
+			return err
+		}
+		got, err := legNumberField(bound[mf.Slot], mf.Field)
+		if err != nil {
+			return err
+		}
+		// Cache key matches LoadRulebook's pre-compile (include gte text so
+		// two entries sharing (slot, field) don't collide). Pre-compile in
+		// LoadRulebook makes this a map hit; the fallback covers tests that
+		// build a Rulebook without going through LoadRulebook.
+		key := ruleID + "/req:gte:" + mf.Slot + "." + mf.Field + ":" + mf.GTE
+		prog, cerr := rb.compile(key, mf.GTE, kindFormula)
+		if cerr != nil {
+			return fmt.Errorf("invalid rulebook: rule %s min_fields legs.%s.%s gte %q: %w", ruleID, mf.Slot, mf.Field, mf.GTE, cerr)
+		}
+		out, _, eerr := prog.Eval(activation)
+		if eerr != nil {
+			return fmt.Errorf("invalid position: rule %s min_fields legs.%s.%s gte %q: %w", ruleID, mf.Slot, mf.Field, mf.GTE, eerr)
+		}
+		need, nerr := celNumber(out)
+		if nerr != nil {
+			return fmt.Errorf("invalid position: rule %s min_fields legs.%s.%s gte %q: %w", ruleID, mf.Slot, mf.Field, mf.GTE, nerr)
+		}
+		if !isFinite(got) || got < need {
+			return fmt.Errorf("invalid position: rule %s requires legs.%s.%s >= %s (got %g, need %g)", ruleID, mf.Slot, mf.Field, mf.GTE, got, need)
+		}
+	}
+
+	if spec.AllSlots != nil {
+		slots := sortedSlotKeys(bound)
+		for _, slot := range slots {
+			leg := bound[slot]
+			for _, field := range spec.AllSlots.RequiredFields {
+				present, err := fieldIsPresent(leg, field)
+				if err != nil {
+					return err
+				}
+				if !present {
+					return fmt.Errorf("invalid position: rule %s requires legs.%s.%s", ruleID, slot, field)
+				}
+			}
+		}
+		if spec.AllSlots.SameField != "" {
+			field := spec.AllSlots.SameField
+			var want string
+			for _, slot := range slots {
+				v, err := legStringField(bound[slot], field)
+				if err != nil {
+					return err
+				}
+				if v == "" {
+					return fmt.Errorf("invalid position: rule %s requires legs.%s.%s", ruleID, slot, field)
+				}
+				if want == "" {
+					want = v
+					continue
+				}
+				if v != want {
+					return fmt.Errorf("invalid position: rule %s requires one %s for mpl(legs), got %q and %q", ruleID, field, want, v)
+				}
+			}
+		}
+	}
+
 	return nil
+}
+
+func sortedStringKeys(m map[string][]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedSlotKeys(m map[string]Leg) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // evaluateOne applies a single rule to an already-prepared Position.
@@ -799,10 +1082,10 @@ func (rb *Rulebook) evaluateOne(pos Position, rule Rule, accountType AccountType
 			return Result{}, false, nil
 		}
 	}
-	if err := validateRuleInputs(rule.ID, bound); err != nil {
+	if err := rb.validateRequirements(rule.ID, rule.Requires, bound, activation); err != nil {
 		return Result{}, false, err
 	}
-	if err := validateRequirements(rule.ID, rule.Requires, bound); err != nil {
+	if err := validateRuleInputs(rule.ID, bound); err != nil {
 		return Result{}, false, err
 	}
 

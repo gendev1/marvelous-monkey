@@ -1,0 +1,39 @@
+schema_version: "1"
+source: "test/minimal"
+
+constants:
+  small_account_floor: 2000
+  concentrated_pct: 0.5
+
+rules:
+  - id: small_account_floor
+    priority: 10
+    scope: account
+    mode: floor
+    basis: account_equity
+    formula: "constants.small_account_floor"
+    reason: "minimum account equity floor"
+
+  - id: concentrated_position_addon
+    priority: 20
+    scope: position
+    applies:
+      account_types: [margin]
+      phases: [maintenance]
+      instrument_kinds: [stock, etf]
+      sides: [long]
+    when: "position.long_market_value > account.current_equity * constants.concentrated_pct"
+    mode: add
+    basis: market_value
+    formula: "position.long_market_value * 0.10"
+    reason: "concentrated single-name add-on"
+
+  - id: leveraged_etf_group_cap
+    priority: 30
+    scope: group
+    group_by: underlying
+    when: "group.gross_market_value > 0"
+    mode: max
+    basis: group_gross_mv
+    formula: "group.gross_market_value * 0.30"
+    reason: "leveraged ETF group cap"
