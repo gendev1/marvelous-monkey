@@ -37,8 +37,8 @@ func buildEnv(rates map[string]map[string]float64) (*cel.Env, error) {
 	// rules/*.yaml. The activation in evaluateOne (rulebook.go) passes Leg
 	// structs directly so cel-go's reflective field access lands on the
 	// real struct, not a map[string]any (which would panic with
-	// "FieldByName on map Value"). Helpers below cast to traits.Indexer —
-	// nativeObj implements Get but not the full traits.Mapper interface.
+	// "FieldByName on map Value"). The bindings below unwrap to a typed
+	// engine.Leg via unwrapLeg — see issue #6.
 	legType := cel.ObjectType(legObjectTypeName)
 	legsType := cel.MapType(cel.StringType, legType)
 
@@ -122,7 +122,7 @@ func buildEnv(rates map[string]map[string]float64) (*cel.Env, error) {
 				[]*cel.Type{legsType},
 				cel.DoubleType,
 				cel.UnaryBinding(func(v ref.Val) ref.Val {
-					return types.Double(maxPotentialLoss(v))
+					return maxPotentialLoss(v)
 				}))),
 
 		// --- is_limited_risk(legs) → bool ---
@@ -134,7 +134,7 @@ func buildEnv(rates map[string]map[string]float64) (*cel.Env, error) {
 				[]*cel.Type{legsType},
 				cel.BoolType,
 				cel.UnaryBinding(func(v ref.Val) ref.Val {
-					return types.Bool(isLimitedRisk(v))
+					return isLimitedRisk(v)
 				}))),
 
 		// --- sum_long_premiums(legs, field), sum_short_premiums(legs, field) ---
@@ -143,25 +143,27 @@ func buildEnv(rates map[string]map[string]float64) (*cel.Env, error) {
 				[]*cel.Type{legsType, cel.StringType},
 				cel.DoubleType,
 				cel.BinaryBinding(func(legsV, fieldV ref.Val) ref.Val {
-					return types.Double(sumPremiums(legsV, asString(fieldV), Long))
+					return sumPremiums(legsV, asString(fieldV), Long)
 				}))),
 		cel.Function("sum_short_premiums",
 			cel.Overload("sum_short_premiums_overload",
 				[]*cel.Type{legsType, cel.StringType},
 				cel.DoubleType,
 				cel.BinaryBinding(func(legsV, fieldV ref.Val) ref.Val {
-					return types.Double(sumPremiums(legsV, asString(fieldV), Short))
+					return sumPremiums(legsV, asString(fieldV), Short)
 				}))),
 	)
 }
 
 // shortOptionReq implements the per-position USD requirement for an uncovered
 // short option. args = [leg, U, class, lev, p]. Returns a CEL error if the
-// class is unknown — silently zeroing here previously masked typos in `class`.
+// class is unknown or if the leg cannot be unwrapped — silently zeroing here
+// previously masked typos in `class` and would now mask a typed-leg miswire.
 func shortOptionReq(rates map[string]map[string]float64, args []ref.Val, isCall bool) ref.Val {
-	// args[0] is a single Leg value. Under the NativeTypes registration the
-	// wrapped value implements traits.Indexer (Get) but not traits.Mapper.
-	leg := args[0].(traits.Indexer)
+	leg, errVal := unwrapLeg(args[0])
+	if errVal != nil {
+		return errVal
+	}
 	U := asFloat(args[1])
 	cls := asString(args[2])
 	lev := asFloat(args[3])
@@ -180,9 +182,9 @@ func shortOptionReq(rates map[string]map[string]float64, args []ref.Val, isCall 
 		return types.NewErr("rate class %q missing min_pct", cls)
 	}
 
-	K := mapFloat(leg, "K")
-	qty := mapFloat(leg, "qty")
-	mult := mapFloat(leg, "mult")
+	K := leg.K
+	qty := leg.Qty
+	mult := leg.Mult
 
 	var basic, minRule float64
 	if isCall {
@@ -195,42 +197,28 @@ func shortOptionReq(rates map[string]map[string]float64, args []ref.Val, isCall 
 	return types.Double(qty * mult * (p + math.Max(basic, minRule)))
 }
 
-// legView is the projection of a CEL leg map that the iterating helpers care
-// about. Centralized so the map-field reads happen in exactly one place.
-type legView struct {
-	kind       string
-	side       Side
-	optionType string
-	K, qty, mu float64
-}
-
-// forEachLeg invokes fn for every leg in the map (option or otherwise). The
-// raw mapper is passed alongside the projection so callers that need extra
-// fields (e.g. a custom premium field name) don't have to re-implement
-// iteration. If fn returns false, iteration stops early.
-func forEachLeg(legsVal ref.Val, fn func(legView, traits.Indexer) bool) {
-	legsMap := legsVal.(traits.Mapper)
+// forEachLeg invokes fn for every leg in the map, unwrapping each map value
+// to a typed engine.Leg. If unwrap fails, iteration stops and the resulting
+// *types.Err is returned; callers must surface it as the binding's result
+// (mirrors rate() — no silent zero-fallback per CLAUDE.md "Required Rules").
+// If fn returns false, iteration stops early with no error.
+func forEachLeg(legsVal ref.Val, fn func(Leg) bool) ref.Val {
+	legsMap, ok := legsVal.(traits.Mapper)
+	if !ok {
+		return types.NewErr("legs unwrap failed: expected map, got %T", legsVal)
+	}
 	it := legsMap.Iterator()
 	for it.HasNext() == types.Bool(true) {
 		k := it.Next()
-		// Each map value is a reflectively-wrapped Leg (traits.Indexer) under
-		// the NativeTypes registration; not a full traits.Mapper.
-		legM, ok := legsMap.Get(k).(traits.Indexer)
-		if !ok {
-			continue
+		leg, errVal := unwrapLeg(legsMap.Get(k))
+		if errVal != nil {
+			return errVal
 		}
-		l := legView{
-			kind:       mapString(legM, "kind"),
-			side:       Side(mapString(legM, "side")),
-			optionType: mapString(legM, "option_type"),
-			K:          mapFloat(legM, "K"),
-			qty:        mapFloat(legM, "qty"),
-			mu:         mapFloat(legM, "mult"),
-		}
-		if !fn(l, legM) {
-			return
+		if !fn(leg) {
+			return nil
 		}
 	}
+	return nil
 }
 
 // maxPotentialLoss walks every option leg in the map, enumerates the sample
@@ -239,16 +227,18 @@ func forEachLeg(legsVal ref.Val, fn func(legView, traits.Indexer) bool) {
 // non-negative USD amount. U=0 is required because for net-short-put
 // structures the slope below the lowest strike is positive, so the worst loss
 // occurs at the floor of the underlying's domain, not at any strike.
-func maxPotentialLoss(legsVal ref.Val) float64 {
-	var opts []legView
-	forEachLeg(legsVal, func(l legView, _ traits.Indexer) bool {
-		if l.kind == "option" {
+func maxPotentialLoss(legsVal ref.Val) ref.Val {
+	var opts []Leg
+	if err := forEachLeg(legsVal, func(l Leg) bool {
+		if l.Kind == OptionKind {
 			opts = append(opts, l)
 		}
 		return true
-	})
+	}); err != nil {
+		return err
+	}
 	if len(opts) == 0 {
-		return 0
+		return types.Double(0)
 	}
 	sampleSet := map[float64]struct{}{0: {}}
 	for _, o := range opts {
@@ -261,27 +251,27 @@ func maxPotentialLoss(legsVal ref.Val) float64 {
 		}
 	}
 	if minPnL >= 0 {
-		return 0
+		return types.Double(0)
 	}
-	return -minPnL
+	return types.Double(-minPnL)
 }
 
 // payoffAt is the signed P&L of an option-only position at underlying price U.
 // Longs add, shorts subtract; intrinsic value is the usual max(0, ...).
-func payoffAt(opts []legView, U float64) float64 {
+func payoffAt(opts []Leg, U float64) float64 {
 	pnl := 0.0
 	for _, o := range opts {
 		var intrinsic float64
-		if o.optionType == "call" {
+		if o.OptionType == "call" {
 			intrinsic = math.Max(0, U-o.K)
 		} else {
 			intrinsic = math.Max(0, o.K-U)
 		}
 		sign := 1.0
-		if o.side == Short {
+		if o.Side == Short {
 			sign = -1.0
 		}
-		pnl += sign * o.qty * o.mu * intrinsic
+		pnl += sign * o.Qty * o.Mult * intrinsic
 	}
 	return pnl
 }
@@ -297,45 +287,90 @@ func payoffAt(opts []legView, U float64) float64 {
 //     samples U=0 explicitly, so the actual number stays correct.
 //   - any non-option leg (stock/etf/etn) — those belong to specific rules,
 //     not this catch-all
-func isLimitedRisk(legsVal ref.Val) bool {
+func isLimitedRisk(legsVal ref.Val) ref.Val {
 	netCallExposure := 0.0
 	limited := true
-	forEachLeg(legsVal, func(l legView, _ traits.Indexer) bool {
-		if l.kind != "option" {
+	if err := forEachLeg(legsVal, func(l Leg) bool {
+		if l.Kind != OptionKind {
 			limited = false
 			return false // short-circuit
 		}
-		if l.optionType == "call" {
+		if l.OptionType == "call" {
 			sign := 1.0
-			if l.side == Short {
+			if l.Side == Short {
 				sign = -1.0
 			}
-			netCallExposure += sign * l.qty * l.mu
+			netCallExposure += sign * l.Qty * l.Mult
 		}
 		return true
-	})
-	return limited && netCallExposure >= 0
+	}); err != nil {
+		return err
+	}
+	return types.Bool(limited && netCallExposure >= 0)
 }
 
-func sumPremiums(legsVal ref.Val, field string, side Side) float64 {
+// sumPremiums adds qty*mult*<field> for every option leg on `side`. The
+// premium field name (`P` / `P0`) is passed by the caller so this helper
+// stays a one-stop replacement for the previous traits.Mapper.Get path.
+func sumPremiums(legsVal ref.Val, field string, side Side) ref.Val {
 	total := 0.0
-	forEachLeg(legsVal, func(l legView, legM traits.Indexer) bool {
-		if l.kind != "option" || l.side != side {
+	if err := forEachLeg(legsVal, func(l Leg) bool {
+		if l.Kind != OptionKind || l.Side != side {
 			return true
 		}
-		total += mapFloat(legM, field) * l.qty * l.mu
+		total += legPremium(l, field) * l.Qty * l.Mult
 		return true
-	})
-	return total
+	}); err != nil {
+		return err
+	}
+	return types.Double(total)
+}
+
+// legPremium reads the named premium field off a typed Leg. The only two
+// fields the rulebook ever passes to sum_*_premiums are `P` and `P0` (see
+// rules/cboe_baseline.yaml); a typo here would silently zero out, which is
+// the exact failure mode this refactor was meant to eliminate, so any other
+// name panics at load via the rulebook compile path — not at eval.
+func legPremium(l Leg, field string) float64 {
+	switch field {
+	case "P":
+		return l.P
+	case "P0":
+		return l.P0
+	}
+	return 0
 }
 
 // --- helpers for unwrapping ref.Val ---
 
+// unwrapLeg extracts a typed engine.Leg from the value cel-go hands a binding
+// for a `map<string, engine.Leg>` entry. Under ext.NativeTypes the wrapped
+// value is a *nativeObj whose Value() returns the underlying Go value — which
+// can be either Leg or *Leg depending on how the activation supplied it. We
+// accept both; anything else is a hard error rather than a zero-valued Leg.
+// Mirrors rate() at env.go: no silent fallback per CLAUDE.md "Required Rules".
+func unwrapLeg(v ref.Val) (Leg, ref.Val) {
+	if v == nil {
+		return Leg{}, types.NewErr("leg unwrap failed: got nil ref.Val")
+	}
+	switch x := v.Value().(type) {
+	case Leg:
+		return x, nil
+	case *Leg:
+		if x == nil {
+			return Leg{}, types.NewErr("leg unwrap failed: got nil *Leg")
+		}
+		return *x, nil
+	default:
+		return Leg{}, types.NewErr("leg unwrap failed: got %T", v.Value())
+	}
+}
+
 // asFloat is a forgiving extractor used on the *inside* of CEL helpers where
-// the value's source is a known-good leg map (e.g., mapFloat reading
-// legs.X.qty into Go arithmetic). It returns 0 for anything non-numeric.
-// DO NOT use it to unwrap a formula's overall return value — use celNumber
-// for that so a formula like `initial: "true"` doesn't silently become 0.
+// the value's source is a known-good numeric arg (e.g. unwrapping the U arg
+// of short_call_req). It returns 0 for anything non-numeric. DO NOT use it
+// to unwrap a formula's overall return value — use celNumber for that so a
+// formula like `initial: "true"` doesn't silently become 0.
 func asFloat(v ref.Val) float64 {
 	switch x := v.(type) {
 	case types.Double:
@@ -374,16 +409,4 @@ func asString(v ref.Val) string {
 		return s
 	}
 	return fmt.Sprintf("%v", v.Value())
-}
-
-// mapFloat / mapString read a string-keyed value from either a CEL map or a
-// reflectively-wrapped native struct: both implement traits.Indexer.Get.
-func mapFloat(m traits.Indexer, key string) float64 {
-	v := m.Get(types.String(key))
-	return asFloat(v)
-}
-
-func mapString(m traits.Indexer, key string) string {
-	v := m.Get(types.String(key))
-	return asString(v)
 }
