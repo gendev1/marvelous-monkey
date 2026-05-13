@@ -5,89 +5,291 @@
 <title>margincalc — Roadmap</title>
 <style>
   :root {
-    --bg: #0f1115;
-    --panel: #161922;
-    --border: #262a36;
-    --text: #e6e8ee;
-    --muted: #9aa3b2;
-    --accent: #7ab8ff;
-    --good: #58c994;
-    --warn: #e3b341;
-    --bad: #ef6b6b;
-    --code-bg: #0b0d12;
+    --bg: #f4f1ea;
+    --surface: #fbfaf7;
+    --panel: #ffffff;
+    --panel-soft: #f8f6f1;
+    --border: #ded8cc;
+    --border-strong: #c8bfaf;
+    --text: #22201c;
+    --muted: #706a60;
+    --dim: #958d7f;
+    --accent: #8a642f;
+    --accent-2: #2f6f66;
+    --good: #2f7650;
+    --warn: #8b651d;
+    --bad: #a34a3d;
+    --ink: #fffdf8;
+    --code-bg: #f0ece4;
+    --shadow: 0 14px 38px rgba(38, 31, 20, 0.08);
+    --radius: 16px;
   }
   * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
   body {
     margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
-    background: var(--bg);
+    min-height: 100vh;
+    font-family: "Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif;
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.68), transparent 260px),
+      linear-gradient(135deg, #f7f4ed 0%, #efe9dc 100%);
     color: var(--text);
     line-height: 1.55;
+    overflow-x: hidden;
   }
-  .wrap { max-width: 980px; margin: 0 auto; padding: 48px 24px 96px; }
-  header h1 { font-size: 32px; margin: 0 0 4px; letter-spacing: -0.01em; }
-  header .sub { color: var(--muted); font-size: 15px; }
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background-image:
+      linear-gradient(rgba(90, 77, 57, 0.045) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(90, 77, 57, 0.035) 1px, transparent 1px);
+    background-size: 48px 48px;
+    mask-image: linear-gradient(to bottom, rgba(0,0,0,.36), transparent 65%);
+  }
+  body::after {
+    display: none;
+  }
+  .wrap {
+    position: relative;
+    z-index: 1;
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 48px 24px 96px;
+  }
+  header {
+    position: relative;
+    overflow: hidden;
+    min-height: 220px;
+    padding: 34px 36px;
+    border: 1px solid var(--border-strong);
+    border-radius: 22px;
+    background:
+      linear-gradient(135deg, rgba(255,255,255,.92), rgba(250,247,240,.96)),
+      linear-gradient(90deg, rgba(138,100,47,.09), transparent 56%);
+    box-shadow: var(--shadow);
+  }
+  header::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 5px;
+    background: linear-gradient(180deg, var(--accent), var(--accent-2));
+  }
+  header::after {
+    content: "RegT";
+    position: absolute;
+    right: 34px;
+    bottom: 18px;
+    font-family: "Iowan Old Style", Georgia, serif;
+    font-size: clamp(68px, 11vw, 128px);
+    line-height: 1;
+    letter-spacing: -0.08em;
+    color: rgba(34, 32, 28, 0.045);
+    pointer-events: none;
+  }
+  .eyebrow {
+    display: inline-flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 18px;
+    padding: 6px 10px;
+    border: 1px solid #d9cfbd;
+    border-radius: 999px;
+    background: #f3eee4;
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 750;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+  .eyebrow::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: var(--accent-2);
+  }
+  header h1 {
+    position: relative;
+    max-width: 720px;
+    margin: 0;
+    font-family: "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+    font-size: clamp(44px, 6.2vw, 76px);
+    line-height: 0.96;
+    letter-spacing: -0.055em;
+  }
+  header .sub {
+    position: relative;
+    max-width: 620px;
+    margin-top: 18px;
+    color: var(--muted);
+    font-size: 17px;
+  }
+  .hero-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+    margin: 16px 0 32px;
+  }
+  .stat {
+    padding: 16px 18px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: rgba(255,255,255,.66);
+    box-shadow: 0 10px 28px rgba(38, 31, 20, 0.05);
+  }
+  .stat b {
+    display: block;
+    margin-bottom: 3px;
+    color: var(--text);
+    font-size: 24px;
+    letter-spacing: -0.04em;
+  }
+  .stat span {
+    color: var(--muted);
+    font-size: 11.5px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
   h2 {
-    margin: 40px 0 16px;
-    font-size: 20px;
-    padding-bottom: 6px;
-    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 42px 0 16px;
+    font-family: "Iowan Old Style", Georgia, serif;
+    font-size: 25px;
+    line-height: 1.05;
+    letter-spacing: -0.035em;
+  }
+  h2::after {
+    content: "";
+    height: 1px;
+    flex: 1;
+    min-width: 48px;
+    background: linear-gradient(90deg, #d8d0c2, transparent);
   }
   h3 { margin: 24px 0 8px; font-size: 16px; }
-  p, li { font-size: 14.5px; }
+  p, li { font-size: 15px; }
+  p { margin: 0 0 12px; }
+  table {
+    border-collapse: separate;
+    border-spacing: 0;
+    width: 100%;
+    margin: 12px 0;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    background: rgba(255,255,255,.58);
+    font-size: 14px;
+  }
+  th, td {
+    text-align: left;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  tr:last-child td { border-bottom: 0; }
+  th {
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  tr:hover td { background: rgba(138, 100, 47, 0.035); }
   code, .mono {
-    font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    font-family: "SF Mono", "Cascadia Mono", Menlo, monospace;
     font-size: 13px;
     background: var(--code-bg);
-    padding: 1px 6px;
-    border-radius: 4px;
+    color: #5c421f;
+    padding: 2px 7px;
+    border-radius: 8px;
     border: 1px solid var(--border);
   }
   pre {
-    background: var(--code-bg);
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.55), transparent),
+      var(--code-bg);
     border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 12px 14px;
+    border-radius: 18px;
+    padding: 18px;
     overflow-x: auto;
-    font-family: "SF Mono", ui-monospace, Menlo, monospace;
-    font-size: 12.5px;
+    font-family: "SF Mono", "Cascadia Mono", Menlo, monospace;
+    font-size: 13px;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.05);
   }
-  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 13.5px; }
-  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
-  th { color: var(--muted); font-weight: 500; }
   .item {
-    background: var(--panel);
+    position: relative;
+    overflow: hidden;
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.96), rgba(250,248,244,.92)),
+      var(--panel);
     border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 16px 18px;
-    margin: 12px 0;
+    border-radius: var(--radius);
+    padding: 21px 23px;
+    margin: 14px 0;
+    box-shadow: 0 12px 32px rgba(38, 31, 20, 0.055);
+    transition: border-color .18s ease, box-shadow .18s ease;
+  }
+  .item::before {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 3px;
+    background: linear-gradient(180deg, var(--accent), var(--accent-2));
+    opacity: 0.55;
+  }
+  .item:hover {
+    border-color: var(--border-strong);
+    box-shadow: 0 16px 38px rgba(38, 31, 20, 0.075);
   }
   .item .head {
     display: flex;
     align-items: baseline;
-    gap: 10px;
-    margin-bottom: 6px;
+    gap: 12px;
+    margin-bottom: 12px;
   }
   .item .num {
-    color: var(--accent);
-    font-family: "SF Mono", ui-monospace, monospace;
+    display: inline-grid;
+    place-items: center;
+    min-width: 38px;
+    height: 38px;
+    color: var(--ink);
+    font-family: "SF Mono", "Cascadia Mono", monospace;
     font-size: 13px;
+    font-weight: 900;
+    background: #2e2a24;
+    border-radius: 12px;
   }
-  .item .title { font-weight: 600; font-size: 15px; }
+  .item .title {
+    font-weight: 800;
+    font-size: 17px;
+    letter-spacing: -0.018em;
+  }
   .item .meta { margin-left: auto; color: var(--muted); font-size: 12.5px; }
   .pill {
     display: inline-block;
-    padding: 1px 8px;
-    border-radius: 10px;
-    font-size: 11.5px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 900;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
     border: 1px solid var(--border);
     color: var(--muted);
+    background: #f5f1e9;
   }
-  .pill.done { color: var(--good); border-color: rgba(88,201,148,.4); }
-  .pill.next { color: var(--accent); border-color: rgba(122,184,255,.4); }
-  .pill.later { color: var(--warn); border-color: rgba(227,179,65,.4); }
-  .pill.deferred { color: var(--bad); border-color: rgba(239,107,107,.4); }
-  ul { padding-left: 22px; }
+  .pill.done { color: var(--good); border-color: rgba(127,224,165,.42); }
+  .pill.next { color: var(--accent); border-color: rgba(244,184,96,.48); }
+  .pill.later { color: var(--warn); border-color: rgba(242,196,109,.44); }
+  .pill.deferred { color: var(--bad); border-color: rgba(255,128,111,.44); }
+  ul, ol { padding-left: 22px; }
+  li { margin: 8px 0; color: #3e3931; }
+  li::marker { color: var(--accent); }
   .muted { color: var(--muted); }
   .grid {
     display: grid;
@@ -96,30 +298,74 @@
   }
   .col h4 { margin: 0 0 6px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
   hr { border: 0; border-top: 1px solid var(--border); margin: 16px 0; }
-  .footnote { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
+  .footnote {
+    display: inline-flex;
+    padding: 10px 13px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--muted);
+    background: rgba(255,255,255,.58);
+    font-size: 12.5px;
+    margin-top: 6px;
+  }
+  @media (max-width: 780px) {
+    .wrap { padding: 24px 14px 72px; }
+    header { min-height: auto; padding: 24px; border-radius: 24px; }
+    header h1 { font-size: 48px; }
+    header .sub { font-size: 16px; }
+    .hero-grid { grid-template-columns: 1fr; }
+    .item { padding: 18px; border-radius: 18px; }
+    .item .head {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      align-items: center;
+    }
+    .item .meta {
+      grid-column: 1 / -1;
+      margin-left: 0;
+    }
+    table { display: block; overflow-x: auto; white-space: nowrap; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: .001ms !important;
+      animation-iteration-count: 1 !important;
+      scroll-behavior: auto !important;
+      transition-duration: .001ms !important;
+    }
+  }
 </style>
 </head>
 <body>
 <div class="wrap">
 
 <header>
+  <div class="eyebrow">Margin engine roadmap</div>
   <h1>margincalc — roadmap</h1>
   <div class="sub">Strategy-based RegT engine today; account aggregator and risk-based layer next.</div>
 </header>
 
+<section class="hero-grid" aria-label="Project status">
+  <div class="stat"><b>22</b><span>Cboe examples</span></div>
+  <div class="stat"><b>30</b><span>Passing tests</span></div>
+  <div class="stat"><b>2</b><span>Immediate priorities</span></div>
+</section>
+
 <h2>Where we are</h2>
 <div class="item">
-  <p><b>Done:</b> per-position RegT calculator. 22 strategies from the Cboe Manual (Nov 2021) reproduce exactly. CEL-based YAML rule file; 27 tests passing.</p>
+  <p><b>Done:</b> per-position RegT calculator. 22 worked / derived examples from the Cboe Margin Manual (Nov 2021) are covered, plus guard, cash-account, and reconciliation tests. <span class="mono">go test ./...</span> passes with 30 test functions.</p>
   <p>Each evaluation returns three numbers per the manual's distinction:</p>
   <ul>
     <li><span class="mono">Requirement</span> — gross "Margin Requirement"</li>
     <li><span class="mono">AppliedProceeds</span> — short-option premium credit</li>
     <li><span class="mono">CashCall</span> — net cash the customer must deposit</li>
   </ul>
-  <p><b>Recently shipped in this session:</b></p>
+  <p><b>Current safeguards:</b></p>
   <ul>
-    <li><span class="mono">is_limited_risk(legs)</span> guard on <span class="mono">generic_limited_risk_combo</span> — net-short-call structures now correctly refuse to match instead of getting a fabricated finite MPL.</li>
+    <li><span class="mono">long_option_long_dated_listed</span> is class-scoped to equity / equity ETF / index / volatility underlyings. ETN long-dated listed options correctly refuse until a specific rule exists.</li>
+    <li><span class="mono">is_limited_risk(legs)</span> guard on <span class="mono">generic_limited_risk_combo</span> — net-short-call structures refuse to match instead of getting a fabricated finite MPL.</li>
     <li>Cash-account coverage: <span class="mono">short_put_uncovered</span>, <span class="mono">short_call_uncovered</span>, <span class="mono">vertical_spread</span>, <span class="mono">short_box_spread</span>, <span class="mono">short_strangle_or_straddle</span>, <span class="mono">generic_limited_risk_combo</span>. Engine now returns numeric + <span class="mono">DepositKind</span> together.</li>
+    <li>Per-position reconciliation CLI exists: <span class="mono">cmd/recon</span> loads position/leg CSVs, runs the engine, and emits per-position diffs.</li>
   </ul>
 </div>
 
@@ -130,6 +376,7 @@
   <tr><td>Engines (per account type)</td><td>Regt, CPM, Cash, IRA, SPAN, RBH_BD, RBH_MM, EXEC</td><td>Regt only</td></tr>
   <tr><td>Position-level requirement</td><td>Yes</td><td>Yes</td></tr>
   <tr><td>Account-level aggregates</td><td>SOD Equity, LMV/SMV (stock & option), Net MV, Adjusted Balance, Net Capital, …</td><td>None</td></tr>
+  <tr><td>Reconciliation</td><td>Vendor/account/position diffing</td><td>Per-position gross requirement only</td></tr>
   <tr><td>House Policy overlays</td><td>Vol, low-price, market-cap, ADV add-ons</td><td>None</td></tr>
   <tr><td>Cross-position decomp</td><td>"Universal Spread Rule" — 2-leg pair-up via optimal path</td><td>None (single-position only)</td></tr>
   <tr><td>Risk shocks</td><td>±20%/±50%, ±3σ, single-name 50%, worst-case</td><td>None</td></tr>
@@ -141,17 +388,41 @@
 <div class="item">
   <div class="head">
     <span class="num">01</span>
-    <span class="title">Class-scope fix on <span class="mono">long_option_long_dated_listed</span></span>
-    <span class="meta"><span class="pill next">next</span> · ~10 min</span>
+    <span class="title">Engine correctness hardening</span>
+    <span class="meta"><span class="pill next">next</span> · highest priority</span>
   </div>
-  <p>Manual restricts 75% loan value to equity / equity-based ETF / index / volatility classes. The current rule applies to any listed option &gt;9mo. Add a <span class="mono">class</span> constraint. Last clean item from the original reviewer's correctness list.</p>
+  <p>Before adding account/risk layers, close the remaining places where the engine can produce a confident but wrong number.</p>
+  <ul>
+    <li>Fix <span class="mono">mpl(legs)</span> and <span class="mono">is_limited_risk(legs)</span>: sample downside at <span class="mono">U=0</span>, treat only call upside as truly unbounded, and sum signed <span class="mono">qty * mult</span> instead of raw quantity.</li>
+    <li>Add tests for bounded put ratio spreads and mismatched contract multipliers.</li>
+    <li>Add position/rule input validation so missing <span class="mono">qty</span>, <span class="mono">K</span>, prices, underlying, or expiration cannot silently become zero-valued CEL inputs.</li>
+    <li>Rule-specific field validation. Convertible <span class="mono">price</span>, warrant <span class="mono">price</span>, and warrant <span class="mono">K_equivalent</span> are now enforced as type-intrinsic invariants in <span class="mono">validateLeg</span>. ETF <span class="mono">price</span> remains a hole: <span class="mono">short_index_call_long_etf</span> reads <span class="mono">legs.le.price</span>, so a leg with <span class="mono">shares=10, price=0</span> still silently returns <span class="mono">Requirement=0</span> there. Closing this systemically (rather than one Kind at a time) wants either per-rule required-field manifests in the YAML, or formulas that error on missing inputs instead of falling back to zero.</li>
+    <li>Add rulebook load validation: unique rule IDs, known <span class="mono">legs_pattern</span>, non-empty formula blocks, and deterministic slot signatures unless alternate constraint-aware binding is implemented.</li>
+  </ul>
 </div>
 
 <div class="item">
   <div class="head">
     <span class="num">02</span>
+    <span class="title">Reconciliation v2: make bad data fail loudly</span>
+    <span class="meta"><span class="pill next">next</span> · high priority</span>
+  </div>
+  <p>The current recon harness is useful, but too forgiving for vendor reconciliation. Harden it before nightly runs or production data imports.</p>
+  <ul>
+    <li>Validate required headers and duplicate headers up front.</li>
+    <li>Reject malformed, missing, <span class="mono">NaN</span>, and <span class="mono">Inf</span> numeric fields instead of defaulting them to zero.</li>
+    <li>Whitelist enums for account type, phase, side, kind, option type, style, venue, and settlement style.</li>
+    <li>Reject duplicate <span class="mono">position_id</span> rows and orphan legs whose <span class="mono">position_id</span> is not present in <span class="mono">positions.csv</span>.</li>
+    <li>Write <span class="mono">permitted</span>, <span class="mono">deposit_kind</span>, <span class="mono">formula_key</span>, and comparison basis. Let callers compare vendor values against gross <span class="mono">Requirement</span> or net <span class="mono">CashCall</span>.</li>
+    <li>Check CSV writer flush/close errors and format valid zeroes as <span class="mono">0.00</span>, not blank cells.</li>
+  </ul>
+</div>
+
+<div class="item">
+  <div class="head">
+    <span class="num">03</span>
     <span class="title">Account aggregator (LMV / SMV / Equity / Adjusted Balance)</span>
-    <span class="meta"><span class="pill next">next</span> · ~half-day</span>
+    <span class="meta"><span class="pill next">next</span> · after #1-#2</span>
   </div>
   <p>New <span class="mono">Account</span> type holding <span class="mono">[]Position</span>, plus an <span class="mono">Aggregate(account)</span> function. Use Sterling's exact field names so reconciliation is apples-to-apples:</p>
 <pre>type AccountSnapshot struct {
@@ -173,16 +444,16 @@
 
 <div class="item">
   <div class="head">
-    <span class="num">03</span>
-    <span class="title">Reconciliation harness</span>
-    <span class="meta"><span class="pill next">next</span> · ~couple hours</span>
+    <span class="num">04</span>
+    <span class="title">Account-level reconciliation</span>
+    <span class="meta"><span class="pill next">next</span> · after #3</span>
   </div>
-  <p>CSV-in / CSV-out diff tool. Take vendor account-level and per-position numbers, run them through the engine, emit a diff. This is the only thing that'll tell you whether the engine actually matches vendor numbers on real positions. Run nightly.</p>
+  <p>The existing harness is per-position only. Once <span class="mono">AccountSnapshot</span> exists, extend recon to ingest vendor account fields and diff them alongside per-position rows. This is the point where nightly vendor comparison becomes meaningful.</p>
 </div>
 
 <div class="item">
   <div class="head">
-    <span class="num">04</span>
+    <span class="num">05</span>
     <span class="title">Rule-set versioning + audit trail</span>
     <span class="meta"><span class="pill later">later</span></span>
   </div>
@@ -191,23 +462,21 @@
 
 <div class="item">
   <div class="head">
-    <span class="num">05</span>
-    <span class="title">House Policy overlays</span>
+    <span class="num">06</span>
+    <span class="title">House rule loading + policy overlays</span>
     <span class="meta"><span class="pill later">later</span></span>
   </div>
-  <p>Match Sterling's four overlay categories so risk users have something to configure:</p>
+  <p>Split this into two separate capabilities: rulebook composition and post-rule add-ons.</p>
   <ul>
-    <li>Vol-based add-on (HV/IV thresholds)</li>
-    <li>Stock-price floor (low-priced stocks)</li>
-    <li>Market-cap add-on</li>
-    <li>ADV / volume add-on</li>
+    <li>Rulebook composition: load baseline Cboe rules plus firm-specific <span class="mono">house_rules.yaml</span> overrides/extensions with deterministic precedence.</li>
+    <li>Post-rule modifiers: vol add-on, low-price floor, market-cap add-on, and ADV / liquidity add-on.</li>
   </ul>
-  <p>Architecturally these are post-rule modifiers applied on top of the base engine's number.</p>
+  <p>Do not blur these. A house rule changes which rule/formula applies; an overlay modifies the result after the base regulatory number is known.</p>
 </div>
 
 <div class="item">
   <div class="head">
-    <span class="num">06</span>
+    <span class="num">07</span>
     <span class="title">Risk-shock engine ("poor-man's PM")</span>
     <span class="meta"><span class="pill later">later</span></span>
   </div>
@@ -224,7 +493,7 @@
 
 <div class="item">
   <div class="head">
-    <span class="num">07</span>
+    <span class="num">08</span>
     <span class="title">Universal Spread Rule (cross-position decomp)</span>
     <span class="meta"><span class="pill later">later</span></span>
   </div>
@@ -233,7 +502,7 @@
 
 <div class="item">
   <div class="head">
-    <span class="num">08</span>
+    <span class="num">09</span>
     <span class="title">Full TIMS / pricing layer</span>
     <span class="meta"><span class="pill deferred">deferred</span> · big swing</span>
   </div>
@@ -249,13 +518,14 @@
 </ul>
 
 <h2>Sequencing logic</h2>
-<p>The middle items (#4 – #7) are all valuable but only matter once a small set of foundations land:</p>
+<p>The middle items (#5 – #8) are all valuable but only matter once a small set of foundations land:</p>
 <ol>
-  <li>Engine correctness on per-position numbers (#1).</li>
-  <li>Account vocabulary that matches the vendor (#2).</li>
-  <li>Evidence that the engine actually agrees with the vendor (#3).</li>
+  <li>Engine correctness and input validation (#1).</li>
+  <li>Reconciliation that fails on bad data instead of silently normalizing it (#2).</li>
+  <li>Account vocabulary that matches the vendor (#3).</li>
+  <li>Evidence that both position and account numbers agree with the vendor (#4).</li>
 </ol>
-<p>With those three, every later piece is verifiable against an existing source of truth. Without them, building #4–#7 just produces unfalsifiable numbers.</p>
+<p>With those four, every later piece is verifiable against an existing source of truth. Without them, building overlays, shocks, or decomp just produces unfalsifiable numbers.</p>
 
 <hr>
 <div class="footnote">Generated 2026-05-12. Living doc — edit freely as the project advances.</div>

@@ -2,6 +2,7 @@ package recon
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"margincalc/internal/engine"
@@ -75,5 +76,41 @@ func TestRecon_endToEnd(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "diff.csv")
 	if err := WriteDiff(out, diffs); err != nil {
 		t.Fatalf("WriteDiff: %v", err)
+	}
+}
+
+// Engine validation errors must not be silently bucketed as NO_RULE. The
+// classifier's "no rule matched" substring check is the contract that makes
+// this work — if a future engine change rewords validation errors to
+// include that phrase, this test catches the regression here rather than
+// in production where a validation bug would masquerade as "vendor has a
+// position our engine doesn't yet handle."
+func TestRecon_validationErrorIsNotNoRule(t *testing.T) {
+	rb, err := engine.LoadRulebook(filepath.Join("..", "..", "rules", "cboe_baseline.yaml"))
+	if err != nil {
+		t.Fatalf("load rulebook: %v", err)
+	}
+	// U=0 is rejected by validatePosition before any rule matching.
+	rows := []PositionRow{{
+		ID: "POS_invalid", U: 0, Class: "equity", Lev: 1.0,
+		AccountType: engine.MarginAccount, Phase: engine.Initial,
+		VendorRequirement: 1000.00,
+	}}
+	positions := []engine.Position{{
+		U: 0, Class: "equity",
+		Legs: []engine.Leg{
+			{Side: engine.Short, Kind: engine.OptionKind, OptionType: "put",
+				K: 80, P: 2, P0: 2, Qty: 1, Mult: 100},
+		},
+	}}
+	diffs := Run(rb, rows, positions, Options{})
+	if len(diffs) != 1 {
+		t.Fatalf("got %d diffs, want 1", len(diffs))
+	}
+	if diffs[0].Verdict != VerdictError {
+		t.Errorf("verdict=%s, want ERROR", diffs[0].Verdict)
+	}
+	if !strings.Contains(diffs[0].Error, "invalid position") {
+		t.Errorf("error %q does not contain 'invalid position' prefix", diffs[0].Error)
 	}
 }

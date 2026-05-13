@@ -207,9 +207,12 @@ func forEachLeg(legsVal ref.Val, fn func(legView, traits.Mapper) bool) {
 	}
 }
 
-// maxPotentialLoss walks every option leg in the map, enumerates distinct
-// strikes, evaluates each leg's payoff at each strike, and returns the
-// largest net loss as a non-negative USD amount.
+// maxPotentialLoss walks every option leg in the map, enumerates the sample
+// points where the piecewise-linear payoff can hit its minimum — each distinct
+// strike plus the downside tail U=0 — and returns the largest net loss as a
+// non-negative USD amount. U=0 is required because for net-short-put
+// structures the slope below the lowest strike is positive, so the worst loss
+// occurs at the floor of the underlying's domain, not at any strike.
 func maxPotentialLoss(legsVal ref.Val) float64 {
 	var opts []legView
 	forEachLeg(legsVal, func(l legView, _ traits.Mapper) bool {
@@ -221,27 +224,13 @@ func maxPotentialLoss(legsVal ref.Val) float64 {
 	if len(opts) == 0 {
 		return 0
 	}
-	strikeSet := map[float64]struct{}{}
+	sampleSet := map[float64]struct{}{0: {}}
 	for _, o := range opts {
-		strikeSet[o.K] = struct{}{}
+		sampleSet[o.K] = struct{}{}
 	}
 	minPnL := math.Inf(+1)
-	for U := range strikeSet {
-		pnl := 0.0
-		for _, o := range opts {
-			var intrinsic float64
-			if o.optionType == "call" {
-				intrinsic = math.Max(0, U-o.K)
-			} else {
-				intrinsic = math.Max(0, o.K-U)
-			}
-			sign := 1.0
-			if o.side == Short {
-				sign = -1.0
-			}
-			pnl += sign * o.qty * o.mu * intrinsic
-		}
-		if pnl < minPnL {
+	for U := range sampleSet {
+		if pnl := payoffAt(opts, U); pnl < minPnL {
 			minPnL = pnl
 		}
 	}
@@ -251,38 +240,55 @@ func maxPotentialLoss(legsVal ref.Val) float64 {
 	return -minPnL
 }
 
+// payoffAt is the signed P&L of an option-only position at underlying price U.
+// Longs add, shorts subtract; intrinsic value is the usual max(0, ...).
+func payoffAt(opts []legView, U float64) float64 {
+	pnl := 0.0
+	for _, o := range opts {
+		var intrinsic float64
+		if o.optionType == "call" {
+			intrinsic = math.Max(0, U-o.K)
+		} else {
+			intrinsic = math.Max(0, o.K-U)
+		}
+		sign := 1.0
+		if o.side == Short {
+			sign = -1.0
+		}
+		pnl += sign * o.qty * o.mu * intrinsic
+	}
+	return pnl
+}
+
 // isLimitedRisk returns true iff an option-only structure has bounded loss
-// in both underlying tails. An options-only payoff diverges when:
-//   - net short call quantity > 0 (U → ∞: each uncovered short call loses ∞)
-//   - net short put quantity > 0 (U → 0: each uncovered short put loses K)
-//     — a single naked short put IS bounded (loss caps at qty*mult*K), but a
-//     ratio put spread with more shorts than longs is unbounded relative to
-//     the long protection; mpl() would only sample existing strikes and miss
-//     the U→0 corner. Reject the whole structure here rather than try to
-//     distinguish "bounded but large" from "unbounded".
+// at the upside tail. Only call exposure can make the loss truly unbounded:
+//   - U → ∞: each uncovered short call loses without bound; so net signed
+//     call exposure must be ≥ 0. Exposure is summed as qty*mult so mixed
+//     multipliers (e.g. 1 mini call mult=10 vs 1 standard call mult=100)
+//     don't appear hedged when they aren't.
+//   - U → 0: puts have a floor — every put's contribution is capped at K, so
+//     even a net-short-put structure has finite worst-case loss. mpl() now
+//     samples U=0 explicitly, so the actual number stays correct.
 //   - any non-option leg (stock/etf/etn) — those belong to specific rules,
 //     not this catch-all
 func isLimitedRisk(legsVal ref.Val) bool {
-	netCallQty, netPutQty := 0.0, 0.0
+	netCallExposure := 0.0
 	limited := true
 	forEachLeg(legsVal, func(l legView, _ traits.Mapper) bool {
 		if l.kind != "option" {
 			limited = false
 			return false // short-circuit
 		}
-		sign := 1.0
-		if l.side == Short {
-			sign = -1.0
-		}
-		switch l.optionType {
-		case "call":
-			netCallQty += sign * l.qty
-		case "put":
-			netPutQty += sign * l.qty
+		if l.optionType == "call" {
+			sign := 1.0
+			if l.side == Short {
+				sign = -1.0
+			}
+			netCallExposure += sign * l.qty * l.mu
 		}
 		return true
 	})
-	return limited && netCallQty >= 0 && netPutQty >= 0
+	return limited && netCallExposure >= 0
 }
 
 func sumPremiums(legsVal ref.Val, field string, side Side) float64 {
@@ -299,6 +305,11 @@ func sumPremiums(legsVal ref.Val, field string, side Side) float64 {
 
 // --- helpers for unwrapping ref.Val ---
 
+// asFloat is a forgiving extractor used on the *inside* of CEL helpers where
+// the value's source is a known-good leg map (e.g., mapFloat reading
+// legs.X.qty into Go arithmetic). It returns 0 for anything non-numeric.
+// DO NOT use it to unwrap a formula's overall return value — use celNumber
+// for that so a formula like `initial: "true"` doesn't silently become 0.
 func asFloat(v ref.Val) float64 {
 	switch x := v.(type) {
 	case types.Double:
@@ -310,6 +321,23 @@ func asFloat(v ref.Val) float64 {
 		return d
 	}
 	return 0
+}
+
+// celNumber is the strict counterpart to asFloat for unwrapping a CEL
+// formula's top-level return value. A formula that returns bool/string/null
+// is a rule bug, not a 0 — silently zeroing would be the worst kind of
+// confidently-wrong margin number, so report it as an error instead. The
+// rulebook validator already catches the rule shape; this is the eval-time
+// safety net for dyn-typed expressions whose output type the compiler
+// couldn't pin (e.g., a conditional with mixed-typed branches).
+func celNumber(v ref.Val) (float64, error) {
+	switch x := v.(type) {
+	case types.Double:
+		return float64(x), nil
+	case types.Int:
+		return float64(x), nil
+	}
+	return 0, fmt.Errorf("formula must return a number, got %s (value: %v)", v.Type().TypeName(), v.Value())
 }
 
 func asString(v ref.Val) string {

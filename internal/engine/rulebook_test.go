@@ -245,9 +245,9 @@ func TestConversionMaintenance_p59(t *testing.T) {
 		Class: "equity",
 		Legs: []Leg{
 			{Side: Long, Kind: OptionKind, OptionType: "put",
-				K: 110, P: 1.35, P0: 1.35, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-05-17"},
+				K: 110, P: 1.35, P0: 1.35, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-05-17", Underlying: "XYZ"},
 			{Side: Short, Kind: OptionKind, OptionType: "call",
-				K: 110, P: 6.50, P0: 6.50, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-05-17"},
+				K: 110, P: 6.50, P0: 6.50, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-05-17", Underlying: "XYZ"},
 			{Side: Long, Kind: StockKind, Shares: 100},
 		},
 	}
@@ -267,9 +267,9 @@ func TestReverseConversionMaintenance_p60(t *testing.T) {
 		Class: "equity",
 		Legs: []Leg{
 			{Side: Long, Kind: OptionKind, OptionType: "call",
-				K: 110, P: 6.50, P0: 6.50, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-05-17"},
+				K: 110, P: 6.50, P0: 6.50, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-05-17", Underlying: "XYZ"},
 			{Side: Short, Kind: OptionKind, OptionType: "put",
-				K: 110, P: 1.35, P0: 1.35, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-05-17"},
+				K: 110, P: 1.35, P0: 1.35, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-05-17", Underlying: "XYZ"},
 			{Side: Short, Kind: StockKind, Shares: 100, ShortSaleProceeds: 11500, SalePrice: 115},
 		},
 	}
@@ -290,9 +290,9 @@ func TestReverseConversionITMPut_p61(t *testing.T) {
 		Class: "equity",
 		Legs: []Leg{
 			{Side: Long, Kind: OptionKind, OptionType: "call",
-				K: 75, P: 0.50, P0: 0.50, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-12-20"},
+				K: 75, P: 0.50, P0: 0.50, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-12-20", Underlying: "XYZ"},
 			{Side: Short, Kind: OptionKind, OptionType: "put",
-				K: 75, P: 4.0, P0: 4.0, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-12-20"},
+				K: 75, P: 4.0, P0: 4.0, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-12-20", Underlying: "XYZ"},
 			{Side: Short, Kind: StockKind, Shares: 100, ShortSaleProceeds: 7190, SalePrice: 71.90},
 		},
 	}
@@ -302,17 +302,23 @@ func TestReverseConversionITMPut_p61(t *testing.T) {
 
 // p.61: Collar maintenance. Long 100 @ 31.75, Long Dec 30 put, Short Dec 35 call.
 // Maintenance: min((10% × 30 + max(0, 30-31.75)) × 100, 25% × 35 × 100)
-//            = min(300 + 0, 875) = $475? Wait, p.61 says:
-//   a) (10% × 30) + 1.75 × 100 = $475   ← That's 10%×30 + max(0, 30-31.75) = 3 + 0 = 3 × 100 = 300?
+//
+//	         = min(300 + 0, 875) = $475? Wait, p.61 says:
+//	a) (10% × 30) + 1.75 × 100 = $475   ← That's 10%×30 + max(0, 30-31.75) = 3 + 0 = 3 × 100 = 300?
+//
 // Re-reading manual p.61:
-//   "(10% × 30) + 1.75 × 100 = $475"
-//   This is actually [(10% × 30) + 1.75] × 100 — but max(0, 30-31.75) = 0 since put is OTM.
+//
+//	"(10% × 30) + 1.75 × 100 = $475"
+//	This is actually [(10% × 30) + 1.75] × 100 — but max(0, 30-31.75) = 0 since put is OTM.
+//
 // Wait: the manual writes "(10% × 30) + 1.75" = 3 + 1.75 = 4.75 × 100 = $475
 // But the OTM amount for a put with K=30, U=31.75 is max(0, K-U) = max(0, -1.75) = 0.
 // So the 1.75 in the manual is the AMOUNT BY WHICH UNDERLYING EXCEEDS PUT STRIKE — that's call-OTM-like.
 // Looking again at the Collar maintenance rule on p.19:
-//   "lower of: 1) 10% of the put exercise price plus any put out-of-the-money amount, or
-//             2) 25% of the call exercise price"
+//
+//	"lower of: 1) 10% of the put exercise price plus any put out-of-the-money amount, or
+//	          2) 25% of the call exercise price"
+//
 // "put out-of-the-money amount" for a long put: U > K means put is OTM, amount = U - K.
 // So OTM-put-amount = max(0, U - K) = max(0, 31.75 - 30) = 1.75. ✓
 //
@@ -320,8 +326,9 @@ func TestReverseConversionITMPut_p61(t *testing.T) {
 // That's a BUG. Need to fix: should be max(0, U - K) for "put OTM amount".
 //
 // Expected: min((0.10 × 30 + max(0, 31.75 - 30)) × 100, 0.25 × 35 × 100)
-//         = min((3 + 1.75) × 100, 8.75 × 100)
-//         = min(475, 875) = $475
+//
+//	= min((3 + 1.75) × 100, 8.75 × 100)
+//	= min(475, 875) = $475
 func TestCollarMaintenance_p61(t *testing.T) {
 	rb := loadRB(t)
 	pos := Position{
@@ -329,9 +336,9 @@ func TestCollarMaintenance_p61(t *testing.T) {
 		Class: "equity",
 		Legs: []Leg{
 			{Side: Long, Kind: OptionKind, OptionType: "put",
-				K: 30, P: 0.40, P0: 0.40, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-12-20"},
+				K: 30, P: 0.40, P0: 0.40, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-12-20", Underlying: "XYZ"},
 			{Side: Short, Kind: OptionKind, OptionType: "call",
-				K: 35, P: 0.20, P0: 0.20, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-12-20"},
+				K: 35, P: 0.20, P0: 0.20, Qty: 1, Mult: 100, Style: "american", Expiration: "2024-12-20", Underlying: "XYZ"},
 			{Side: Long, Kind: StockKind, Shares: 100},
 		},
 	}
@@ -344,8 +351,10 @@ func TestCollarMaintenance_p61(t *testing.T) {
 
 // p.58: Protective put maintenance. Long 100 XYZ @ 103.50, Long Nov 95 put.
 // Maintenance: min((10% × 95 + max(0, 103.50 - 95)) × 100, 25% × 103.50 × 100)
-//            = min((9.50 + 8.50) × 100, 2587.50)
-//            = min(1800, 2587.50) = $1,800
+//
+//	= min((9.50 + 8.50) × 100, 2587.50)
+//	= min(1800, 2587.50) = $1,800
+//
 // Same bug as collar: put-OTM amount is max(0, U - K) when underlying is ABOVE strike.
 func TestProtectivePutMaintenance_p58(t *testing.T) {
 	rb := loadRB(t)
@@ -365,13 +374,17 @@ func TestProtectivePutMaintenance_p58(t *testing.T) {
 // p.42: Vertical call spread. Long Nov 125 call @ 3.80, Short Nov 120 call @ 8.40, U=128.50
 // MPL = 500 (max loss at U=120 is short ITM 0, at U=125 short -500 long 0; net -500)
 // Margin = min(short_uncov_req, mpl) + long_paid - short_proceeds
-//        = min(3410, 500) + 380 - 840 = 500 + 380 - 840 = $40
+//
+//	= min(3410, 500) + 380 - 840 = 500 + 380 - 840 = $40
+//
 // Wait, manual says margin requirement is $880, SMA debit $40 = "880 - 840" — the $880 includes long paid in full.
 // Let's compute: MPL = $500. long P0=3.80 → 380 in. short proceeds = 840.
 // margin_initial = min(3410, 500) + 380 - 840 = 500 + 380 - 840 = 40
 // But manual says $880. Reading again:
-//   "Margin Requirement: $500 + $380 = $880"
-//   "SMA Debit or Margin Call: $880 - $840 = $40"
+//
+//	"Margin Requirement: $500 + $380 = $880"
+//	"SMA Debit or Margin Call: $880 - $840 = $40"
+//
 // So manual's "margin requirement" is MPL + long-cost = $880, then short proceeds applied = $40 cash needed.
 // Our formula gives the NET (cash needed). To match manual's "$880", we'd compute MPL + long-cost without subtracting short proceeds.
 // Decision: our requirement = "minimum cash to put on" = MPL + long_paid - short_proceeds = $40.
@@ -433,7 +446,8 @@ func TestVerticalPutSpread_p39(t *testing.T) {
 // MPL = $500 (worst at U=540: -2000 short, +1500 long-555, 0 long-540 = -500).
 // Margin requirement (manual): $2,040; SMA = $600 after applying $1,440 short proceeds.
 // Net cash = MPL + long_premiums - short_premiums
-//         = 500 + (560 + 980) - (2 × 720) = 500 + 1540 - 1440 = $600 ✓
+//
+//	= 500 + (560 + 980) - (2 × 720) = 500 + 1540 - 1440 = $600 ✓
 func TestLongButterflyPuts_p52(t *testing.T) {
 	rb := loadRB(t)
 	pos := Position{
@@ -441,11 +455,11 @@ func TestLongButterflyPuts_p52(t *testing.T) {
 		Class: "equity",
 		Legs: []Leg{
 			{Side: Long, Kind: OptionKind, OptionType: "put",
-				K: 540, P: 5.60, P0: 5.60, Qty: 1, Mult: 100, Style: "american"},
+				K: 540, P: 5.60, P0: 5.60, Qty: 1, Mult: 100, Style: "american", Underlying: "XYZ"},
 			{Side: Short, Kind: OptionKind, OptionType: "put",
-				K: 550, P: 7.20, P0: 7.20, Qty: 2, Mult: 100, Style: "american"},
+				K: 550, P: 7.20, P0: 7.20, Qty: 2, Mult: 100, Style: "american", Underlying: "XYZ"},
 			{Side: Long, Kind: OptionKind, OptionType: "put",
-				K: 555, P: 9.80, P0: 9.80, Qty: 1, Mult: 100, Style: "american"},
+				K: 555, P: 9.80, P0: 9.80, Qty: 1, Mult: 100, Style: "american", Underlying: "XYZ"},
 		},
 	}
 	res := mustEvaluate(t, rb, pos, MarginAccount, Initial)
@@ -469,13 +483,13 @@ func TestShortIronButterfly_p56(t *testing.T) {
 		Class: "equity",
 		Legs: []Leg{
 			{Side: Long, Kind: OptionKind, OptionType: "put",
-				K: 16, P: 0.10, P0: 0.10, Qty: 1, Mult: 100, Style: "american"},
+				K: 16, P: 0.10, P0: 0.10, Qty: 1, Mult: 100, Style: "american", Underlying: "XYZ"},
 			{Side: Short, Kind: OptionKind, OptionType: "put",
-				K: 20, P: 0.20, P0: 0.20, Qty: 1, Mult: 100, Style: "american"},
+				K: 20, P: 0.20, P0: 0.20, Qty: 1, Mult: 100, Style: "american", Underlying: "XYZ"},
 			{Side: Short, Kind: OptionKind, OptionType: "call",
-				K: 20, P: 7.0, P0: 7.0, Qty: 1, Mult: 100, Style: "american"},
+				K: 20, P: 7.0, P0: 7.0, Qty: 1, Mult: 100, Style: "american", Underlying: "XYZ"},
 			{Side: Long, Kind: OptionKind, OptionType: "call",
-				K: 24, P: 4.0, P0: 4.0, Qty: 1, Mult: 100, Style: "american"},
+				K: 24, P: 4.0, P0: 4.0, Qty: 1, Mult: 100, Style: "american", Underlying: "XYZ"},
 		},
 	}
 	res := mustEvaluate(t, rb, pos, MarginAccount, Initial)
@@ -541,9 +555,13 @@ func TestShortCallLongConvertible_maintenanceCap_p14(t *testing.T) {
 // -----------------------------------------------------------------------------
 // p.14 — Short Call + Long Marginable Stock Warrant (formula-only).
 // Setup: Long 100 XYZ warrants @ $4, exercise $50;
-//        Short 1 XYZ Mar 45 call @ $2.
+//
+//	Short 1 XYZ Mar 45 call @ $2.
+//
 // Margin initial = maintenance:
-//   100% * 4 * 100  + max(0, 50 - 45) * 100  = 400 + 500 = $900.00
+//
+//	100% * 4 * 100  + max(0, 50 - 45) * 100  = 400 + 500 = $900.00
+//
 // Cash account: not permitted.
 // -----------------------------------------------------------------------------
 func TestShortCallLongWarrant_margin_p14(t *testing.T) {
@@ -575,7 +593,8 @@ func TestShortCallLongWarrant_margin_p14(t *testing.T) {
 
 // Warrant maintenance value cap: warrant market value $60, call strike $45,
 // warrant exercise $50.
-//   min(60, 45)*100 + max(0, 50-45)*100 = 4,500 + 500 = $5,000.
+//
+//	min(60, 45)*100 + max(0, 50-45)*100 = 4,500 + 500 = $5,000.
 func TestShortCallLongWarrant_marketCap_p14(t *testing.T) {
 	rb := loadRB(t)
 	pos := Position{
