@@ -32,7 +32,7 @@ Positions → Account → vendor-comparable account state (LMV / SMV / equity / 
 - [x] `Account` / `AccountPosition` / `AccountSnapshot`
 - [x] `PositionEvaluation` with `NoRule` / `Violation` as first-class outcomes
 - [x] `validate(account)` — shape + per-leg market-value validation
-- [x] `Aggregate(account) → AccountSnapshot` (+ `AggregateWithRulebook`)
+- [x] `Aggregate(account, evals) → AccountSnapshot` (+ `AggregateWithRulebook(rb, account)`)
 - [x] `DepositRequirements` rollup by kind
 - [ ] Account-level reconciliation harness — deferred pending vendor API contract
 
@@ -59,7 +59,7 @@ _None — Layer 2 aggregator landed; next active item picks up from the backlog 
 
 | #  | Item                                                                                                                                                                                                            | Layer   | Status |
 |---:|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|--------|
-| 03 | **`Aggregate(account) → AccountSnapshot`** — `Aggregate` + `AggregateWithRulebook` shipped in `internal/account/`. Sterling-named LMV/SMV/equity/adjusted-balance fields; `DepositRequirements` rollup by kind. | Layer 2 | done   |
+| 03 | **`Aggregate(account, evals) → AccountSnapshot`** — `Aggregate` + `AggregateWithRulebook` shipped in `internal/account/`. Sterling-named LMV/SMV/equity/adjusted-balance fields; `DepositRequirements` rollup by kind. | Layer 2 | done   |
 | 01 | **Engine correctness hardening** — `mpl` samples U=0, signed `qty*mult`, bounded put-ratio + mismatched-mult tests, typed Leg, load-time overload-mismatch, `validateLeg` invariants — all on main.            | Layer 1 | done   |
 
 ## Backlog · sequenced, not yet started
