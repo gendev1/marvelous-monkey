@@ -32,8 +32,8 @@ Positions → Account → vendor-comparable account state (LMV / SMV / equity / 
 - [x] `Account` / `AccountPosition` / `AccountSnapshot`
 - [x] `PositionEvaluation` with `NoRule` / `Violation` as first-class outcomes
 - [x] `validate(account)` — shape + per-leg market-value validation
-- [ ] `Aggregate(account) → AccountSnapshot`
-- [ ] `DepositRequirements` rollup by kind
+- [x] `Aggregate(account) → AccountSnapshot`
+- [x] `DepositRequirements` rollup by kind
 - [ ] Account-level reconciliation harness
 
 *12 tests · `internal/account`*

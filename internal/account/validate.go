@@ -58,9 +58,9 @@ func validate(account Account) error {
 	}
 
 	seen := make(map[string]struct{}, len(account.Positions))
-	for _, p := range account.Positions {
+	for i, p := range account.Positions {
 		if p.ID == "" {
-			continue
+			return fmt.Errorf("invalid account: id=%q position[%d] ID is required", account.ID, i)
 		}
 		if _, dup := seen[p.ID]; dup {
 			return fmt.Errorf("invalid account: id=%q duplicate position id %q", account.ID, p.ID)
@@ -118,6 +118,14 @@ func validateLeg(accountID, posLabel string, j int, leg engine.Leg, pos engine.P
 
 	switch leg.Kind {
 	case engine.OptionKind:
+		if !isFinite(leg.Mult) {
+			return fmt.Errorf("invalid account: id=%q %s leg[%d] option mult=%g is not finite",
+				accountID, posLabel, j, leg.Mult)
+		}
+		if leg.Mult < 0 {
+			return fmt.Errorf("invalid account: id=%q %s leg[%d] option mult=%g must be >= 0",
+				accountID, posLabel, j, leg.Mult)
+		}
 		if !isFinite(leg.P) {
 			return fmt.Errorf("invalid account: id=%q %s leg[%d] option P=%g is not finite",
 				accountID, posLabel, j, leg.P)

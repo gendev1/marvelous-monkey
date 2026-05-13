@@ -203,8 +203,8 @@ func TestCoveredCallInitial_p47(t *testing.T) {
 		Class: "equity",
 		Legs: []Leg{
 			{Side: Short, Kind: OptionKind, OptionType: "call",
-				K: 90, P: 7.0, P0: 7.0, Qty: 1, Mult: 100, Style: "american"},
-			{Side: Long, Kind: StockKind, Shares: 100},
+				K: 90, P: 7.0, P0: 7.0, Qty: 1, Mult: 100, Style: "american", Underlying: "XYZ"},
+			{Side: Long, Kind: StockKind, Shares: 100, Underlying: "XYZ"},
 		},
 	}
 	res := mustEvaluate(t, rb, pos, MarginAccount, Initial)

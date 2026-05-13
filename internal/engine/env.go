@@ -390,7 +390,11 @@ func asFloat(v ref.Val) float64 {
 func celNumber(v ref.Val) (float64, error) {
 	switch x := v.(type) {
 	case types.Double:
-		return float64(x), nil
+		n := float64(x)
+		if !isFinite(n) {
+			return 0, fmt.Errorf("formula must return a finite number, got %g", n)
+		}
+		return n, nil
 	case types.Int:
 		return float64(x), nil
 	}

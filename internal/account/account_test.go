@@ -111,15 +111,12 @@ func TestValidate_rejectsDuplicatePositionIDs(t *testing.T) {
 	dup.ID = "p1"
 	a.Positions = append(a.Positions, dup)
 	assertInvalidAccount(t, validate(a))
+}
 
-	a2 := minimalAccount()
-	a2.Positions[0].ID = ""
-	empty := longStockPosition()
-	empty.ID = ""
-	a2.Positions = append(a2.Positions, empty)
-	if err := validate(a2); err != nil {
-		t.Fatalf("two empty position IDs should pass, got %v", err)
-	}
+func TestValidate_rejectsEmptyPositionID(t *testing.T) {
+	a := minimalAccount()
+	a.Positions[0].ID = ""
+	assertInvalidAccount(t, validate(a))
 }
 
 func optionPosition(p, qty float64) AccountPosition {
@@ -149,6 +146,12 @@ func TestValidate_rejectsBadOptionLeg(t *testing.T) {
 	t.Run("Qty=0 fails", func(t *testing.T) {
 		a := minimalAccount()
 		a.Positions = []AccountPosition{optionPosition(1, 0)}
+		assertInvalidAccount(t, validate(a))
+	})
+	t.Run("Mult<0 fails", func(t *testing.T) {
+		a := minimalAccount()
+		a.Positions = []AccountPosition{optionPosition(1, 1)}
+		a.Positions[0].Position.Legs[0].Mult = -100
 		assertInvalidAccount(t, validate(a))
 	})
 	t.Run("P=0 passes", func(t *testing.T) {
@@ -230,6 +233,12 @@ func TestValidate_rejectsNonFiniteLegInputs(t *testing.T) {
 		t.Run("option/Qty/"+nf.name, func(t *testing.T) {
 			a := minimalAccount()
 			a.Positions = []AccountPosition{optionPosition(1, nf.val)}
+			assertInvalidAccount(t, validate(a))
+		})
+		t.Run("option/Mult/"+nf.name, func(t *testing.T) {
+			a := minimalAccount()
+			a.Positions = []AccountPosition{optionPosition(1, 1)}
+			a.Positions[0].Position.Legs[0].Mult = nf.val
 			assertInvalidAccount(t, validate(a))
 		})
 		t.Run("stock/Shares/"+nf.name, func(t *testing.T) {
