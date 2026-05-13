@@ -300,15 +300,6 @@ rules:
         - "legs.bc.expiration == legs.bp.expiration"
         - "legs.bp.expiration == legs.sp.expiration"
         - "legs.sp.expiration == legs.sc.expiration"
-        - "legs.bc.underlying == legs.bp.underlying"
-        - "legs.bp.underlying == legs.sp.underlying"
-        - "legs.sp.underlying == legs.sc.underlying"
-        - "legs.bc.style == legs.bp.style"
-        - "legs.bp.style == legs.sp.style"
-        - "legs.sp.style == legs.sc.style"
-        - "legs.bc.qty * legs.bc.mult == legs.bp.qty * legs.bp.mult"
-        - "legs.bp.qty * legs.bp.mult == legs.sp.qty * legs.sp.mult"
-        - "legs.sp.qty * legs.sp.mult == legs.sc.qty * legs.sc.mult"
     formulas:
       # No cash block. American boxes COULD be cash-secured (net debit on
       # deposit) but European boxes rely on the loan-value mechanism which
@@ -357,15 +348,6 @@ rules:
         - "legs.bc.expiration == legs.bp.expiration"
         - "legs.bp.expiration == legs.sp.expiration"
         - "legs.sp.expiration == legs.sc.expiration"
-        - "legs.bc.underlying == legs.bp.underlying"
-        - "legs.bp.underlying == legs.sp.underlying"
-        - "legs.sp.underlying == legs.sc.underlying"
-        - "legs.bc.style == legs.bp.style"
-        - "legs.bp.style == legs.sp.style"
-        - "legs.sp.style == legs.sc.style"
-        - "legs.bc.qty * legs.bc.mult == legs.bp.qty * legs.bp.mult"
-        - "legs.bp.qty * legs.bp.mult == legs.sp.qty * legs.sp.mult"
-        - "legs.sp.qty * legs.sp.mult == legs.sc.qty * legs.sc.mult"
     formulas:
       cash:
         # Cash-secured short box: max loss on deposit. Mirrors the margin

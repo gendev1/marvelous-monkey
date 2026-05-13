@@ -363,13 +363,7 @@ func TestRuleInputValidation_longBoxRequiresUnderlyingAndContractSize(t *testing
 		pos.Legs[i].Underlying = "XYZ"
 	}
 	pos.Legs[3].Qty = 2
-	_, err := rb.Evaluate(pos, MarginAccount, Initial)
-	if err == nil {
-		t.Fatalf("expected no-match for mismatched box contract size, got nil")
-	}
-	if !strings.Contains(err.Error(), "no rule matched") {
-		t.Fatalf("got %q, want no rule matched", err.Error())
-	}
+	mustValidationError(t, rb, pos)
 }
 
 func TestRuleInputValidation_shortPutShortStockMissingShortSaleProceeds(t *testing.T) {
