@@ -13,13 +13,10 @@ import (
 var errNotImplemented = errors.New("overlay: not implemented")
 
 // Engine evaluates an overlay Rulebook against an account snapshot and
-// reference data, producing a HouseRequirement. The zero value is not
-// useful; construct an Engine with a loaded Rulebook before calling
-// Evaluate. Behavior is filled in by later issues; this skeleton only
-// declares the type surface.
-type Engine struct {
-	rulebook *Rulebook
-}
+// reference data, producing a HouseRequirement. Behavior is filled in
+// by later issues; this skeleton only declares the type surface, so
+// the struct is empty for now.
+type Engine struct{}
 
 // Rulebook is the compiled, in-memory representation of the overlay
 // rule set. Loaded from one or more YAML files via LoadRulebook. The
