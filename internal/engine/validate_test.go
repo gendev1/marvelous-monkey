@@ -789,6 +789,252 @@ rules:
 	})
 }
 
+// -----------------------------------------------------------------------------
+// RequireSpec load-time validation. Each case isolates a single failure mode
+// of the requires block. The schema is structurally validated by validateRule;
+// gte CEL compilation happens in LoadRulebook's compile loop.
+
+func TestRequires_UnknownSlotRejected(t *testing.T) {
+	err := loadRulebookFromYAML(t, `
+schema_version: "1"
+rates:
+  equity: { base_pct: 0.20, min_pct: 0.10 }
+rules:
+  - id: r1
+    match:
+      legs:
+        - { name: a, side: long, kind: option }
+    requires:
+      required_fields:
+        ghost: [underlying]
+    formulas:
+      margin: { initial: "0.0", maintenance: "0.0" }
+`)
+	assertRulebookError(t, err, `unknown slot "ghost"`)
+}
+
+func TestRequires_UnknownStringFieldRejected(t *testing.T) {
+	err := loadRulebookFromYAML(t, `
+schema_version: "1"
+rates:
+  equity: { base_pct: 0.20, min_pct: 0.10 }
+rules:
+  - id: r1
+    match:
+      legs:
+        - { name: a, side: long,  kind: option }
+        - { name: b, side: short, kind: option }
+    requires:
+      same_across_slots:
+        - { field: flavor, slots: [a, b] }
+    formulas:
+      margin: { initial: "0.0", maintenance: "0.0" }
+`)
+	assertRulebookError(t, err, `field "flavor"`)
+}
+
+func TestRequires_NumericFieldInStringSlot(t *testing.T) {
+	err := loadRulebookFromYAML(t, `
+schema_version: "1"
+rates:
+  equity: { base_pct: 0.20, min_pct: 0.10 }
+rules:
+  - id: r1
+    match:
+      legs:
+        - { name: a, side: long,  kind: option }
+        - { name: b, side: short, kind: option }
+    requires:
+      same_across_slots:
+        - { field: qty, slots: [a, b] }
+    formulas:
+      margin: { initial: "0.0", maintenance: "0.0" }
+`)
+	assertRulebookError(t, err, `field "qty"`)
+}
+
+func TestRequires_PositiveFieldsRejectsStringField(t *testing.T) {
+	err := loadRulebookFromYAML(t, `
+schema_version: "1"
+rates:
+  equity: { base_pct: 0.20, min_pct: 0.10 }
+rules:
+  - id: r1
+    match:
+      legs:
+        - { name: a, side: long, kind: option }
+    requires:
+      positive_fields:
+        a: [underlying]
+    formulas:
+      margin: { initial: "0.0", maintenance: "0.0" }
+`)
+	assertRulebookError(t, err, `field "underlying"`)
+}
+
+func TestRequires_SameAcrossSlotsNeedsTwoSlots(t *testing.T) {
+	err := loadRulebookFromYAML(t, `
+schema_version: "1"
+rates:
+  equity: { base_pct: 0.20, min_pct: 0.10 }
+rules:
+  - id: r1
+    match:
+      legs:
+        - { name: a, side: long, kind: option }
+    requires:
+      same_across_slots:
+        - { field: underlying, slots: [a] }
+    formulas:
+      margin: { initial: "0.0", maintenance: "0.0" }
+`)
+	assertRulebookError(t, err, "at least two slots")
+}
+
+func TestRequires_SameContractSizeNeedsTwoSlots(t *testing.T) {
+	err := loadRulebookFromYAML(t, `
+schema_version: "1"
+rates:
+  equity: { base_pct: 0.20, min_pct: 0.10 }
+rules:
+  - id: r1
+    match:
+      legs:
+        - { name: a, side: long, kind: option }
+    requires:
+      same_contract_size:
+        - [a]
+    formulas:
+      margin: { initial: "0.0", maintenance: "0.0" }
+`)
+	assertRulebookError(t, err, "at least two slots")
+}
+
+func TestRequires_MinFieldsGTEDoesNotCompile(t *testing.T) {
+	err := loadRulebookFromYAML(t, `
+schema_version: "1"
+rates:
+  equity: { base_pct: 0.20, min_pct: 0.10 }
+rules:
+  - id: r1
+    match:
+      legs:
+        - { name: x, side: long, kind: option }
+    requires:
+      min_fields:
+        - { slot: x, field: qty, gte: "legs.x.qty *" }
+    formulas:
+      margin: { initial: "0.0", maintenance: "0.0" }
+`)
+	assertRulebookError(t, err, "min_fields")
+}
+
+func TestRequires_AllSlotsOnlyWithAllOptions(t *testing.T) {
+	err := loadRulebookFromYAML(t, `
+schema_version: "1"
+rates:
+  equity: { base_pct: 0.20, min_pct: 0.10 }
+rules:
+  - id: r1
+    match:
+      legs:
+        - { name: a, side: long, kind: option }
+    requires:
+      all_slots:
+        required_fields: [underlying]
+    formulas:
+      margin: { initial: "0.0", maintenance: "0.0" }
+`)
+	assertRulebookError(t, err, "all_slots")
+}
+
+// Empty requires block must load cleanly — no rule currently sets one.
+func TestRequires_EmptyBlockLoads(t *testing.T) {
+	err := loadRulebookFromYAML(t, `
+schema_version: "1"
+rates:
+  equity: { base_pct: 0.20, min_pct: 0.10 }
+rules:
+  - id: r1
+    match:
+      legs:
+        - { name: a, side: long, kind: option }
+    requires: {}
+    formulas:
+      margin: { initial: "0.0", maintenance: "0.0" }
+`)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+}
+
+// legs_pattern: all_options with explicit slot references in required_fields
+// must be rejected — only all_slots is valid in that mode.
+func TestRequires_AllOptionsRejectsExplicitSlotRefs(t *testing.T) {
+	err := loadRulebookFromYAML(t, `
+schema_version: "1"
+rates:
+  equity: { base_pct: 0.20, min_pct: 0.10 }
+rules:
+  - id: r1
+    match:
+      legs_pattern: all_options
+      min_legs: 2
+    requires:
+      required_fields:
+        a: [underlying]
+    formulas:
+      margin: { initial: "0.0", maintenance: "0.0" }
+`)
+	assertRulebookError(t, err, "all_options")
+}
+
+// A well-formed requires block populates Rule.Requires after load — confirms
+// the YAML round-trips into the struct rather than being silently dropped.
+func TestRequires_PopulatedAfterLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rules.yaml")
+	if err := os.WriteFile(path, []byte(`
+schema_version: "1"
+rates:
+  equity: { base_pct: 0.20, min_pct: 0.10 }
+rules:
+  - id: r1
+    match:
+      legs:
+        - { name: sc, side: short, kind: option, option_type: call }
+        - { name: ls, side: long,  kind: stock }
+    requires:
+      required_fields:
+        sc: [underlying]
+        ls: [underlying]
+      same_across_slots:
+        - { field: underlying, slots: [sc, ls] }
+      min_fields:
+        - { slot: ls, field: shares, gte: "legs.sc.qty * legs.sc.mult" }
+    formulas:
+      margin: { initial: "0.0", maintenance: "0.0" }
+`), 0o600); err != nil {
+		t.Fatalf("write temp rulebook: %v", err)
+	}
+	rb, err := LoadRulebook(path)
+	if err != nil {
+		t.Fatalf("LoadRulebook: %v", err)
+	}
+	if got := len(rb.rules); got != 1 {
+		t.Fatalf("want 1 rule, got %d", got)
+	}
+	req := rb.rules[0].Requires
+	if got := req.RequiredFields["sc"]; len(got) != 1 || got[0] != "underlying" {
+		t.Fatalf("RequiredFields[sc] = %v", got)
+	}
+	if len(req.SameAcrossSlots) != 1 || req.SameAcrossSlots[0].Field != "underlying" {
+		t.Fatalf("SameAcrossSlots = %+v", req.SameAcrossSlots)
+	}
+	if len(req.MinFields) != 1 || req.MinFields[0].GTE != "legs.sc.qty * legs.sc.mult" {
+		t.Fatalf("MinFields = %+v", req.MinFields)
+	}
+}
+
 // A constraint that is the literal `true` (or any bool-typed expression)
 // must continue to load cleanly — the assertion accepts every bool, not just
 // bool-shaped comparisons.
