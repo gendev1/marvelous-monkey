@@ -55,6 +55,35 @@ func buildState(legs []WorkingLeg) (State, error) {
 	return State{Legs: out}, nil
 }
 
+// applyConsumption returns a new State with the consumption plan's amounts
+// subtracted from the matching input legs. Lookup is by LegID — never by
+// engine.Leg struct identity, per §"Optimizer types". Legs whose remaining
+// OpenQty AND OpenShares fall to ≤ epsQty are dropped so the memo key (and
+// recursion fanout) shrinks each step. The resulting Legs slice is a fresh
+// allocation and remains sorted by LegID since state.Legs was already
+// LegID-sorted by buildState and we walk it in that order.
+func applyConsumption(state State, assignment map[string]WorkingLeg, plan ConsumptionPlan) State {
+	consumed := make(map[LegID]ConsumedAmount, len(assignment))
+	for name, wl := range assignment {
+		amt := plan.PerSlot[name]
+		acc := consumed[wl.ID]
+		acc.Qty += amt.Qty
+		acc.Shares += amt.Shares
+		consumed[wl.ID] = acc
+	}
+	out := make([]WorkingLeg, 0, len(state.Legs))
+	for _, wl := range state.Legs {
+		if c, ok := consumed[wl.ID]; ok {
+			wl.OpenQty -= c.Qty
+			wl.OpenShares -= c.Shares
+		}
+		if wl.OpenQty > epsQty || wl.OpenShares > epsQty {
+			out = append(out, wl)
+		}
+	}
+	return State{Legs: out}
+}
+
 // roundEps rounds x to the nearest 1e-9 to keep Key() stable across
 // arithmetic with tiny floating-point drift.
 func roundEps(x float64) float64 {

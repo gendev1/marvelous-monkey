@@ -161,6 +161,14 @@ func bindSlots(legs []Leg, slots []LegSlot) (map[string]Leg, bool) {
 	return bound, true
 }
 
+// BindSlotsAll is the exported wrapper around bindSlotsAll for the Layer-0.5
+// optimizer (which lives in a sibling internal package and cannot reach the
+// unexported function). Semantics, determinism guarantees, and preconditions
+// are identical to bindSlotsAll's documentation immediately below.
+func BindSlotsAll(legs []Leg, slots []LegSlot) [][]int {
+	return bindSlotsAll(legs, slots)
+}
+
 // bindSlotsAll enumerates every assignment of slot → leg index that satisfies
 // each slot's attribute predicate (side/kind/option_type/venue). Unlike
 // bindSlots — which short-circuits on the singleton-disjoint fast-path and

@@ -13,6 +13,7 @@ package optimizer
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	"margincalc/internal/engine"
@@ -184,19 +185,24 @@ func compareResidualErr(a, b error) int {
 
 // Optimize decomposes the input bucket into recognized strategies.
 //
-// In this PR every leg is scored as a residual (naked-option rule per leg, or
-// ErrStockResidualUnsupported for stock-like legs). B&B branching lands in
-// PR-3.
+// PR-3 adds the B&B search: decompose() races every (ruleID, assignment) it
+// can score against a residual-only completion at every node, memoized by
+// State.Key(). Stock-coverage and ETF families remain stubbed in
+// consumptionFor (they return (_, false, nil)), so this PR's surface stays
+// option-only; PR-4 / PR-5 wire those families.
 //
 // Contract:
 //   - empty input → Decomposition{TotalRequirement: 0}, nil.
 //   - WorkingLeg with both OpenQty > eps and OpenShares > eps is malformed
 //     input — returns a validation error and the empty Decomposition.
-//   - On success, returns a complete Decomposition with all legs attributed.
-//   - On error, returns a partial Decomposition holding every leg that did
-//     score successfully (scoring is not aborted at the first failing leg —
-//     all legs are visited, errors are collected, and the strongest one per
-//     compareResidualErr is returned).
+//   - On success, returns the cheapest Decomposition per less() with all
+//     legs attributed (sub-positions are aggregated — one per (rule,
+//     assignment, max-units), not one per contract).
+//   - When the search yields +Inf at the root (no template + residual
+//     completion fits), Optimize falls back to scoreAllResidual for partial
+//     output and returns the strongest residual error per compareResidualErr.
+//   - Hard engine errors from EvaluateRule propagate as Go error; partial
+//     output is whatever scoreAllResidual still produces for the input.
 func (o *Optimizer) Optimize(facts BucketFacts, legs []WorkingLeg) (Decomposition, error) {
 	state, err := buildState(legs)
 	if err != nil {
@@ -205,5 +211,25 @@ func (o *Optimizer) Optimize(facts BucketFacts, legs []WorkingLeg) (Decompositio
 	if len(state.Legs) == 0 {
 		return Decomposition{TotalRequirement: 0}, nil
 	}
-	return o.scoreAllResidual(state, facts)
+	memo := map[string]Decomposition{}
+	residualErrs := map[string]error{}
+	best, err := o.decompose(state, facts, memo, residualErrs)
+	if err != nil {
+		// Hard engine error during search. Provide the best partial we
+		// can — whatever residual-only scoring still produces — and let
+		// the engine error be the one returned to the caller.
+		partial, _ := o.scoreAllResidual(state, facts)
+		return partial, err
+	}
+	if math.IsInf(best.TotalRequirement, +1) {
+		// No template / residual combination scored the root. Fall back
+		// to a full residual-only pass for partial output and return the
+		// strongest residual error seen across the search.
+		partial, residualErr := o.scoreAllResidual(state, facts)
+		if rootErr := residualErrs[state.Key()]; rootErr != nil {
+			residualErr = pickStronger(residualErr, rootErr)
+		}
+		return partial, residualErr
+	}
+	return best, nil
 }
