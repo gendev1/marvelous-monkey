@@ -646,6 +646,10 @@ rules:
   #   conv.K_equivalent call exercise price (used in maintenance valuation cap)
   # ---------------------------------------------------------------------------
   - id: short_call_long_convertible
+    # Draft per CLAUDE.md (no worked Cboe example) — exclude from optimizer
+    # auto-decomposition until reviewed. Evaluate's first-match dispatch is
+    # unaffected.
+    optimizer_target: false
     match:
       legs:
         - { name: sc,   side: short, kind: option,      option_type: call }
@@ -677,6 +681,10 @@ rules:
   #   wt.K_equivalent warrant exercise price
   # ---------------------------------------------------------------------------
   - id: short_call_long_warrant
+    # Draft per CLAUDE.md (no worked Cboe example) — exclude from optimizer
+    # auto-decomposition until reviewed. Evaluate's first-match dispatch is
+    # unaffected.
+    optimizer_target: false
     match:
       legs:
         - { name: sc, side: short, kind: option,  option_type: call }
