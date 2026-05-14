@@ -22,4 +22,8 @@
 // Reconciliation against vendor house numbers is deferred to the API
 // layer (cmd/recon and a future vendor adapter), not done inside the
 // engine.
+//
+// Working example: rules/house_overlay.example.yaml ships a runnable
+// overlay rulebook covering position-scope floor/block modes and
+// group-scope max — load this for a working example of the schema.
 package overlay

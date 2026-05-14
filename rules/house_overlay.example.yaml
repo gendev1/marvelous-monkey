@@ -1,0 +1,99 @@
+# =============================================================================
+# House Overlay — TEMPLATE / EXAMPLE
+#
+# Layer-3 house overlay rules. Loaded by overlay.LoadRulebook against the
+# Layer-2 account.AccountSnapshot to produce the customer-facing
+# HouseRequirement. Schema is documented inline in internal/overlay/.
+#
+# This file is shipped as a working example: the integration tests in
+# internal/overlay/integration_test.go load it as-is, and downstream
+# adopters can copy it to rules/house_overlay.yaml and edit in place.
+# =============================================================================
+schema_version: "1"
+source: "margincalc example overlay"
+
+constants:
+  # Per-share floor applied to long stocks priced below the threshold —
+  # mirrors a common "low-price stock" house policy.
+  low_price_threshold: 5.0
+  low_price_per_share_min: 2.50
+  # Short low-price stocks: minimum per-share carry.
+  low_price_short_per_share_min: 2.50
+  # Single-name concentration: when an underlying's gross MV exceeds this
+  # fraction of account equity, charge an add-on percentage of that gross.
+  concentration_threshold: 0.25
+  concentration_addon_pct: 0.30
+
+rules:
+  # ---------------------------------------------------------------------------
+  # Block: any position in a non-marginable security in a margin account.
+  # The companion `security.last_price > 0.0` guard prevents firing on
+  # synthetic SecurityFacts (i.e. positions with no reference-data entry,
+  # which default Marginable=false). Those cases should surface as the
+  # missing-ref warning instead.
+  # ---------------------------------------------------------------------------
+  - id: non_marginable_block
+    priority: 50
+    scope: position
+    applies:
+      account_types: [margin]
+      phases: [initial, maintenance]
+    when: "security.marginable == false && security.last_price > 0.0"
+    mode: block
+    reason: "Security is not marginable in margin accounts"
+
+  # ---------------------------------------------------------------------------
+  # Per-position floor for long stocks priced below low_price_threshold:
+  # requirement is at least low_price_per_share_min per share.
+  # ---------------------------------------------------------------------------
+  - id: low_price_long_floor
+    priority: 100
+    scope: position
+    applies:
+      account_types: [margin]
+      phases: [initial, maintenance]
+      instrument_kinds: [stock]
+      sides: [long]
+    when: "security.last_price > 0.0 && security.last_price < constants.low_price_threshold"
+    mode: max
+    basis: market_value
+    formula: "position.long_shares * constants.low_price_per_share_min"
+    reason: "low-priced long stock per-share margin floor"
+
+  # ---------------------------------------------------------------------------
+  # Per-position floor for short stocks priced below low_price_threshold.
+  # ---------------------------------------------------------------------------
+  - id: low_price_short_floor
+    priority: 110
+    scope: position
+    applies:
+      account_types: [margin]
+      phases: [initial, maintenance]
+      instrument_kinds: [stock]
+      sides: [short]
+    when: "security.last_price > 0.0 && security.last_price < constants.low_price_threshold"
+    mode: max
+    basis: market_value
+    formula: "position.short_shares * constants.low_price_short_per_share_min"
+    reason: "low-priced short stock per-share margin floor"
+
+  # ---------------------------------------------------------------------------
+  # Group-scope concentration: when a single underlying's gross market
+  # value exceeds concentration_threshold of account equity, charge an
+  # add-on percentage of that gross. Mode `max` composes the per-position
+  # baseline sum (D2): house requirement for the group is raised to at
+  # least the overlay amount, with the Layer-1 sum acting as the floor.
+  # ---------------------------------------------------------------------------
+  - id: single_name_concentration
+    priority: 200
+    scope: group
+    group_by: underlying
+    applies:
+      account_types: [margin]
+      phases: [initial, maintenance]
+      instrument_kinds: [stock, etf, etn]
+    when: "group.gross_market_value > account.current_equity * constants.concentration_threshold"
+    mode: max
+    basis: group_gross_mv
+    formula: "group.gross_market_value * constants.concentration_addon_pct"
+    reason: "single-name concentration add-on"
