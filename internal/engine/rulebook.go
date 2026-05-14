@@ -883,9 +883,13 @@ func (rb *Rulebook) validateRequirements(ruleID string, spec RequireSpec, bound 
 		}
 		leg := bound[slot]
 		for _, field := range spec.RequiredFields[slot] {
+			// fieldIsPresent's error is a config/code-drift signal
+			// ("unknown leg field"), not a position-shape guard failure —
+			// propagate as plain error so callers don't demote a rulebook
+			// bug to "rule doesn't apply."
 			present, err := fieldIsPresent(leg, field)
 			if err != nil {
-				return wrapRequires(err)
+				return err
 			}
 			if !present {
 				return requiresErrorf("invalid position: rule %s requires legs.%s.%s", ruleID, slot, field)
@@ -901,7 +905,7 @@ func (rb *Rulebook) validateRequirements(ruleID string, spec RequireSpec, bound 
 		for _, field := range spec.PositiveFields[slot] {
 			v, err := legNumberField(leg, field)
 			if err != nil {
-				return wrapRequires(err)
+				return err
 			}
 			if err := requirePositive(ruleID, slot, field, v); err != nil {
 				return wrapRequires(err)
@@ -948,7 +952,7 @@ func (rb *Rulebook) validateRequirements(ruleID string, spec RequireSpec, bound 
 		}
 		got, err := legNumberField(bound[mf.Slot], mf.Field)
 		if err != nil {
-			return wrapRequires(err)
+			return err
 		}
 		// LoadRulebook pre-compiles every min_fields gte expression into
 		// rb.progs; lookupProg is read-only so Evaluate stays concurrent-safe.
@@ -974,7 +978,7 @@ func (rb *Rulebook) validateRequirements(ruleID string, spec RequireSpec, bound 
 			for _, field := range spec.AllSlots.RequiredFields {
 				present, err := fieldIsPresent(leg, field)
 				if err != nil {
-					return wrapRequires(err)
+					return err
 				}
 				if !present {
 					return requiresErrorf("invalid position: rule %s requires legs.%s.%s", ruleID, slot, field)
@@ -987,7 +991,7 @@ func (rb *Rulebook) validateRequirements(ruleID string, spec RequireSpec, bound 
 			for _, slot := range slots {
 				v, err := legStringField(bound[slot], field)
 				if err != nil {
-					return wrapRequires(err)
+					return err
 				}
 				if v == "" {
 					return requiresErrorf("invalid position: rule %s requires legs.%s.%s", ruleID, slot, field)
