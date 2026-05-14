@@ -161,6 +161,85 @@ func bindSlots(legs []Leg, slots []LegSlot) (map[string]Leg, bool) {
 	return bound, true
 }
 
+// bindSlotsAll mirrors bindSlots's DFS over the (slot → leg) assignment space
+// but collects every leaf assignment instead of returning the first. Result
+// shape: a slice of length-N int slices where row[si] is the leg index bound
+// to slot si (using the input slot ordering, not the internal popcount-sorted
+// visit order). Returns nil if any slot has no candidate, if n > maxSlots, or
+// if n == 0 — same fast-fail conditions as bindSlots.
+//
+// Unlike bindSlots, bindSlotsAll does NOT take the singleton-disjoint fast
+// path: even when each slot's candidate is a unique singleton there is
+// exactly one valid assignment, so the DFS is correct without it; the extra
+// branch would only add complexity for no measurable saving. The singleton
+// case in production rules also stays handled by bindSlots — this function
+// is for the optimizer's ambiguity-aware path.
+//
+// Allocations: each successful leaf allocates one length-N int slice. The
+// fixed-size arrays (`candidates`, `order`, `assign`) live on the stack. The
+// caller is responsible for keeping the slot set small enough that the
+// branching factor doesn't blow up; the optimizer caps decomposition arity
+// well below maxSlots so this isn't a hot-path concern.
+func bindSlotsAll(legs []Leg, slots []LegSlot) [][]int {
+	n := len(slots)
+	if n == 0 || n > maxSlots || len(legs) > maxSlots {
+		return nil
+	}
+
+	var candidates [maxSlots]uint16
+	for si, slot := range slots {
+		var mask uint16
+		for li, leg := range legs {
+			if slotMatches(slot, leg) {
+				mask |= uint16(1) << uint(li)
+			}
+		}
+		if mask == 0 {
+			return nil
+		}
+		candidates[si] = mask
+	}
+
+	var order [maxSlots]int
+	for i := range n {
+		order[i] = i
+	}
+	for i := 1; i < n; i++ {
+		oi := order[i]
+		pi := popcount16(candidates[oi])
+		j := i - 1
+		for j >= 0 && popcount16(candidates[order[j]]) > pi {
+			order[j+1] = order[j]
+			j--
+		}
+		order[j+1] = oi
+	}
+
+	var assign [maxSlots]int
+	var results [][]int
+	var dfs func(depth int, used uint16)
+	dfs = func(depth int, used uint16) {
+		if depth == n {
+			row := make([]int, n)
+			for si := range n {
+				row[si] = assign[si]
+			}
+			results = append(results, row)
+			return
+		}
+		si := order[depth]
+		remaining := candidates[si] & ^used
+		for remaining != 0 {
+			bit := remaining & -remaining
+			remaining ^= bit
+			assign[si] = bits.TrailingZeros16(bit)
+			dfs(depth+1, used|bit)
+		}
+	}
+	dfs(0, 0)
+	return results
+}
+
 func popcount16(x uint16) int { return bits.OnesCount16(x) }
 
 func slotMatches(s LegSlot, l Leg) bool {

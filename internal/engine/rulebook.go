@@ -151,6 +151,11 @@ type Rulebook struct {
 	rules     []Rule
 	env       *cel.Env
 	progs     map[string]cel.Program // cache: rule_id + "/" + key → compiled Program
+	// optimizerTargets is the sorted list of rule IDs for which
+	// ruleIsDefaultOptimizerTarget(r) is true. Computed once at LoadRulebook
+	// time so OptimizerTargets() is a constant-time cache hit and stays
+	// concurrent-safe alongside the rest of Rulebook.
+	optimizerTargets []string
 }
 
 func LoadRulebook(path string) (*Rulebook, error) {
@@ -234,6 +239,16 @@ func LoadRulebook(path string) (*Rulebook, error) {
 			}
 		}
 	}
+	// Cache the optimizer target set: the rulebook is immutable post-load,
+	// so OptimizerTargets() can be a sorted-slice copy without recomputing.
+	var targets []string
+	for _, r := range rb.rules {
+		if ruleIsDefaultOptimizerTarget(r) {
+			targets = append(targets, r.ID)
+		}
+	}
+	sort.Strings(targets)
+	rb.optimizerTargets = targets
 	return rb, nil
 }
 
@@ -1069,6 +1084,218 @@ func (rb *Rulebook) evaluateOne(pos Position, rule Rule, accountType AccountType
 	}
 	// deposit_kind-only (no numeric formula): return the kind. Otherwise we
 	// compute the number AND attach the kind — both are meaningful.
+	if expr == "" {
+		if block.DepositKind != "" {
+			return Result{RuleID: rule.ID, FormulaKey: formulaKey, AccountType: string(accountType), Phase: string(phase), Permitted: true, DepositKind: block.DepositKind}, true, nil
+		}
+		return Result{}, false, fmt.Errorf("rule %s has no %s formula", rule.ID, formulaKey)
+	}
+
+	prog := rb.lookupProg(rule.ID + "/" + formulaKey)
+	out, _, err := prog.Eval(activation)
+	if err != nil {
+		return Result{}, false, fmt.Errorf("eval %s: %w", rule.ID, err)
+	}
+	req, err := celNumber(out)
+	if err != nil {
+		return Result{}, false, fmt.Errorf("eval %s %s: %w", rule.ID, formulaKey, err)
+	}
+
+	var proceeds float64
+	if proceedsExpr != "" {
+		pprog := rb.lookupProg(rule.ID + "/" + proceedsKey)
+		pout, _, err := pprog.Eval(activation)
+		if err != nil {
+			return Result{}, false, fmt.Errorf("eval %s %s: %w", rule.ID, proceedsKey, err)
+		}
+		proceeds, err = celNumber(pout)
+		if err != nil {
+			return Result{}, false, fmt.Errorf("eval %s %s: %w", rule.ID, proceedsKey, err)
+		}
+	}
+
+	return Result{
+		RuleID:          rule.ID,
+		FormulaKey:      formulaKey,
+		AccountType:     string(accountType),
+		Phase:           string(phase),
+		Requirement:     req,
+		AppliedProceeds: proceeds,
+		CashCall:        req - proceeds,
+		Permitted:       true,
+		DepositKind:     block.DepositKind,
+	}, true, nil
+}
+
+// RuleByID returns the rule with the given ID and whether it was found. The
+// returned Rule is a value-copy of the loaded entry; callers must not rely on
+// mutating it to influence subsequent Evaluate calls.
+func (rb *Rulebook) RuleByID(id string) (Rule, bool) {
+	for _, r := range rb.rules {
+		if r.ID == id {
+			return r, true
+		}
+	}
+	return Rule{}, false
+}
+
+// OptimizerTargets returns the sorted list of rule IDs that the spread
+// optimizer (Layer 0.5) may use as decomposition templates: rules whose
+// ruleIsDefaultOptimizerTarget resolves to true (multi-slot strategy rules,
+// minus YAML-overridden exclusions). Naked single-leg sinks, the
+// generic_limited_risk_combo catch-all, and any rule with
+// `optimizer_target: false` are absent.
+//
+// The slice is cached at LoadRulebook time; callers receive a defensive copy
+// so mutations don't leak into the Rulebook's concurrent-read invariant.
+func (rb *Rulebook) OptimizerTargets() []string {
+	out := make([]string, len(rb.optimizerTargets))
+	copy(out, rb.optimizerTargets)
+	return out
+}
+
+// buildActivation assembles the CEL activation map for a single rule
+// invocation. Centralized so EvaluateRule, Match, and (future) other entry
+// points stay aligned with evaluateOne on what's in scope.
+func (rb *Rulebook) buildActivation(pos Position, bound map[string]Leg) map[string]any {
+	return map[string]any{
+		"U":         pos.U,
+		"class":     pos.Class,
+		"lev":       pos.Lev,
+		"legs":      bound,
+		"constants": rb.constants,
+	}
+}
+
+// tryMatchAndConstraints binds slots for `rule` against `pos` and verifies
+// every match.constraints expression evaluates cleanly to true. A clean
+// `false` from any constraint, or a non-binding match shape, returns
+// (_, false, nil) — the rule doesn't apply. A CEL eval error propagates as
+// (_, false, err). On success the returned binding can be re-used by callers
+// that want to chain requires evaluation and/or formula eval.
+func (rb *Rulebook) tryMatchAndConstraints(pos Position, rule Rule) (map[string]Leg, bool, error) {
+	bound, ok := rb.tryMatch(pos, rule)
+	if !ok {
+		return nil, false, nil
+	}
+	activation := rb.buildActivation(pos, bound)
+	for _, c := range rule.Match.Constraints {
+		prog := rb.lookupProg(rule.ID + "/c:" + c)
+		out, _, err := prog.Eval(activation)
+		if err != nil {
+			return nil, false, fmt.Errorf("eval constraint %s %q: %w", rule.ID, c, err)
+		}
+		if b, ok := out.Value().(bool); !ok || !b {
+			return nil, false, nil
+		}
+	}
+	return bound, true, nil
+}
+
+// Match is a thin wrapper around tryMatchAndConstraints for callers that
+// want just the leg binding: the result of slot binding plus the
+// match.constraints expression sieve, before any requires evaluation or
+// formula eval. Returns (nil, false, nil) when the rule does not apply
+// (binding refused or a constraint evaluated cleanly to false), (binding,
+// true, nil) when the rule's match shape and constraints hold, and
+// (nil, false, err) for an unknown rule ID, an invalid position, or a CEL
+// eval failure on a constraint.
+//
+// Unlike EvaluateRule, Match does NOT evaluate the `requires` block: the
+// optimizer pre-screens candidates with Match before paying for full
+// EvaluateRule scoring on the survivors.
+func (rb *Rulebook) Match(pos Position, ruleID string) (map[string]Leg, bool, error) {
+	rule, ok := rb.RuleByID(ruleID)
+	if !ok {
+		return nil, false, fmt.Errorf("unknown rule %q", ruleID)
+	}
+	pos = rb.preparePosition(pos)
+	if err := validatePosition(pos); err != nil {
+		return nil, false, err
+	}
+	return rb.tryMatchAndConstraints(pos, rule)
+}
+
+// EvaluateRule scores `pos` as if exactly `ruleID` were the dispatched rule.
+// It is the optimizer's per-candidate scoring entry point; production code
+// that wants production dispatch semantics should call Evaluate.
+//
+// Returns:
+//   - (res, true, nil)  the rule matched, every constraint and every
+//     `requires` precondition held, and a Result was computed.
+//   - (_, false, nil)   the rule does not apply: bindSlots refused, a
+//     constraint evaluated cleanly to false, OR a `requires` precondition
+//     failed. The requires-failure demotion is intentional and differs from
+//     Evaluate, which would surface a requires failure as an
+//     "invalid position:" error. The optimizer scores many candidates and a
+//     failed precondition on one is not a programming error — it just means
+//     this decomposition isn't viable for this position.
+//   - (_, false, err)   the rule ID was unknown, the position failed
+//     universal validation, a CEL constraint/formula errored at eval, or the
+//     rule lacked a formula for the requested (accountType, phase) pair.
+//     These are hard errors that callers should surface.
+func (rb *Rulebook) EvaluateRule(pos Position, ruleID string, accountType AccountType, phase Phase) (Result, bool, error) {
+	rule, ok := rb.RuleByID(ruleID)
+	if !ok {
+		return Result{}, false, fmt.Errorf("unknown rule %q", ruleID)
+	}
+	pos = rb.preparePosition(pos)
+	if err := validatePosition(pos); err != nil {
+		return Result{}, false, err
+	}
+	bound, ok, err := rb.tryMatchAndConstraints(pos, rule)
+	if err != nil {
+		return Result{}, false, err
+	}
+	if !ok {
+		return Result{}, false, nil
+	}
+	activation := rb.buildActivation(pos, bound)
+	if err := rb.validateRequirements(rule.ID, rule.Requires, bound, activation); err != nil {
+		// Demote requires failures to "rule does not apply" — see godoc.
+		return Result{}, false, nil
+	}
+	return rb.evalFormulas(rule, activation, accountType, phase)
+}
+
+// evalFormulas computes the Result for a rule whose match/constraints/requires
+// have already been verified. Split out of evaluateOne so EvaluateRule and the
+// dispatch path produce identical numbers on the happy path.
+func (rb *Rulebook) evalFormulas(rule Rule, activation map[string]any, accountType AccountType, phase Phase) (Result, bool, error) {
+	var block FormulaBlock
+	var keyPrefix string
+	switch accountType {
+	case CashAccount:
+		block = rule.Formulas.Cash
+		keyPrefix = "cash"
+	case MarginAccount:
+		block = rule.Formulas.Margin
+		keyPrefix = "margin"
+	default:
+		return Result{}, false, fmt.Errorf("unknown account type %q", string(accountType))
+	}
+	switch phase {
+	case Initial, Maintenance:
+	default:
+		return Result{}, false, fmt.Errorf("unknown phase %q", string(phase))
+	}
+	formulaKey := keyPrefix + "." + string(phase)
+
+	if block.Permitted != nil && !*block.Permitted {
+		return Result{RuleID: rule.ID, FormulaKey: formulaKey, AccountType: string(accountType), Phase: string(phase), Permitted: false}, true, nil
+	}
+
+	var expr, proceedsExpr, proceedsKey string
+	switch phase {
+	case Initial:
+		expr = block.Initial
+		proceedsExpr = block.InitialProceeds
+		proceedsKey = keyPrefix + ".initial_proceeds"
+	case Maintenance:
+		expr = block.Maintenance
+		proceedsExpr = block.MaintenanceProceeds
+		proceedsKey = keyPrefix + ".maintenance_proceeds"
+	}
 	if expr == "" {
 		if block.DepositKind != "" {
 			return Result{RuleID: rule.ID, FormulaKey: formulaKey, AccountType: string(accountType), Phase: string(phase), Permitted: true, DepositKind: block.DepositKind}, true, nil

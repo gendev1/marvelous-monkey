@@ -2,6 +2,7 @@ package engine
 
 import (
 	"math"
+	"os"
 	"strings"
 	"testing"
 )
@@ -1049,5 +1050,259 @@ func TestRulebookYAMLOverridesParse(t *testing.T) {
 		if !found[id] {
 			t.Errorf("rule %s not present in loaded rulebook", id)
 		}
+	}
+}
+
+// verticalCallSpread_p42 is the manual-p.42 vertical call spread fixture
+// reused by EvaluateRule tests so the happy path and Evaluate parity check
+// can share a known-good number.
+func verticalCallSpread_p42() Position {
+	return Position{
+		U:     128.50,
+		Class: "equity",
+		Legs: []Leg{
+			{Side: Long, Kind: OptionKind, OptionType: "call",
+				K: 125, P: 3.80, P0: 3.80, Qty: 1, Mult: 100, Style: "american", Venue: "listed",
+				Underlying: "XYZ", Expiration: "2024-11-15"},
+			{Side: Short, Kind: OptionKind, OptionType: "call",
+				K: 120, P: 8.40, P0: 8.40, Qty: 1, Mult: 100, Style: "american", Venue: "listed",
+				Underlying: "XYZ", Expiration: "2024-11-15"},
+		},
+	}
+}
+
+func TestEvaluateRule_UnknownRule(t *testing.T) {
+	rb := loadRB(t)
+	pos := verticalCallSpread_p42()
+	_, ok, err := rb.EvaluateRule(pos, "no-such-rule", MarginAccount, Initial)
+	if err == nil {
+		t.Fatalf("expected error for unknown rule, got nil")
+	}
+	if ok {
+		t.Errorf("expected ok=false, got true")
+	}
+	if !strings.Contains(err.Error(), "unknown rule") {
+		t.Errorf("error %q does not mention 'unknown rule'", err.Error())
+	}
+}
+
+func TestEvaluateRule_NoMatch(t *testing.T) {
+	rb := loadRB(t)
+	// Vertical-spread position scored as covered_call: bind shape differs
+	// (covered_call needs a stock leg), so the rule does not apply.
+	pos := verticalCallSpread_p42()
+	res, ok, err := rb.EvaluateRule(pos, "covered_call", MarginAccount, Initial)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ok {
+		t.Errorf("expected ok=false for non-matching rule, got ok=true with %+v", res)
+	}
+}
+
+func TestEvaluateRule_RequiresFailureIsNoMatch(t *testing.T) {
+	rb := loadRB(t)
+	// vertical_spread requires `venue` on both legs (required_fields). Blank
+	// venues bind cleanly (constraint `venue == venue` holds for "" == "")
+	// but fail the requires precondition; EvaluateRule must demote that to
+	// (_, false, nil) — NOT surface it as an error like Evaluate would.
+	pos := Position{
+		U: 128.50, Class: "equity",
+		Legs: []Leg{
+			{Side: Long, Kind: OptionKind, OptionType: "call",
+				K: 125, P: 3.80, P0: 3.80, Qty: 1, Mult: 100,
+				Style: "american", Underlying: "XYZ", Expiration: "2024-11-15"},
+			{Side: Short, Kind: OptionKind, OptionType: "call",
+				K: 120, P: 8.40, P0: 8.40, Qty: 1, Mult: 100,
+				Style: "american", Underlying: "XYZ", Expiration: "2024-11-15"},
+		},
+	}
+	res, ok, err := rb.EvaluateRule(pos, "vertical_spread", MarginAccount, Initial)
+	if err != nil {
+		t.Fatalf("expected requires failure to demote to no-match, got error: %v", err)
+	}
+	if ok {
+		t.Errorf("expected ok=false on requires failure, got ok=true with %+v", res)
+	}
+}
+
+func TestEvaluateRule_HardErrorPropagates(t *testing.T) {
+	// Build a tiny in-memory rulebook whose only rule has a constraint that
+	// compiles fine but errors at eval time: rate("nonexistent_class","x")
+	// returns a CEL eval error per env.go. EvaluateRule must propagate that
+	// as (_, false, err) — not demote it like a requires failure.
+	yamlBody := `schema_version: "1.0"
+rates:
+  equity:
+    naked_short_pct: 0.20
+    otm_floor_pct:   0.10
+    min_per_share:   2.50
+rules:
+  - id: bad_constraint
+    match:
+      legs:
+        - { name: l, side: long, kind: option }
+      constraints:
+        - "rate('nonexistent_class', 'naked_short_pct') > 0.0"
+    formulas:
+      margin:
+        initial: "0.0"
+`
+	dir := t.TempDir()
+	path := dir + "/bad.yaml"
+	if err := os.WriteFile(path, []byte(yamlBody), 0o600); err != nil {
+		t.Fatalf("write tmp rulebook: %v", err)
+	}
+	badRB, err := LoadRulebook(path)
+	if err != nil {
+		t.Fatalf("LoadRulebook: %v", err)
+	}
+	pos := Position{
+		U: 100, Class: "equity",
+		Legs: []Leg{
+			{Side: Long, Kind: OptionKind, OptionType: "call",
+				K: 100, P: 1.0, P0: 1.0, Qty: 1, Mult: 100},
+		},
+	}
+	_, ok, err := badRB.EvaluateRule(pos, "bad_constraint", MarginAccount, Initial)
+	if err == nil {
+		t.Fatalf("expected eval-time CEL error to propagate, got ok=%v err=nil", ok)
+	}
+	if ok {
+		t.Errorf("expected ok=false on hard error")
+	}
+}
+
+func TestEvaluateRule_MatchesEvaluateOnHappyPath(t *testing.T) {
+	rb := loadRB(t)
+	pos := verticalCallSpread_p42()
+	dispatched, err := rb.Evaluate(pos, MarginAccount, Initial)
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	scored, ok, err := rb.EvaluateRule(pos, dispatched.RuleID, MarginAccount, Initial)
+	if err != nil {
+		t.Fatalf("EvaluateRule: %v", err)
+	}
+	if !ok {
+		t.Fatalf("EvaluateRule returned ok=false on Evaluate's chosen rule %s", dispatched.RuleID)
+	}
+	if scored != dispatched {
+		t.Errorf("EvaluateRule result differs from Evaluate:\n got=%+v\nwant=%+v", scored, dispatched)
+	}
+}
+
+func TestRuleByID(t *testing.T) {
+	rb := loadRB(t)
+	r, ok := rb.RuleByID("vertical_spread")
+	if !ok {
+		t.Fatalf("RuleByID(vertical_spread): expected found")
+	}
+	if r.ID != "vertical_spread" {
+		t.Errorf("RuleByID returned rule with ID %q, want vertical_spread", r.ID)
+	}
+	if _, ok := rb.RuleByID("no-such-rule"); ok {
+		t.Errorf("RuleByID(no-such-rule): expected not found")
+	}
+}
+
+func TestOptimizerTargets_Sorted(t *testing.T) {
+	rb := loadRB(t)
+	got := rb.OptimizerTargets()
+	for i := 1; i < len(got); i++ {
+		if got[i-1] >= got[i] {
+			t.Errorf("OptimizerTargets not strictly sorted at index %d: %q >= %q", i, got[i-1], got[i])
+		}
+	}
+	gotSet := map[string]struct{}{}
+	for _, id := range got {
+		gotSet[id] = struct{}{}
+	}
+	// Exclusions: naked single-leg sinks, the catch-all, and convertible/
+	// warrant draft rules (explicit `optimizer_target: false` in YAML).
+	excluded := []string{
+		"long_option_short_dated",
+		"long_option_long_dated_listed",
+		"long_option_long_dated_otc",
+		"short_call_uncovered",
+		"short_put_uncovered",
+		"generic_limited_risk_combo",
+		"short_call_long_convertible",
+		"short_call_long_warrant",
+	}
+	for _, id := range excluded {
+		if _, present := gotSet[id]; present {
+			t.Errorf("OptimizerTargets unexpectedly includes %q", id)
+		}
+	}
+	// Spot-check a handful of expected inclusions to catch silent drift.
+	required := []string{
+		"vertical_spread",
+		"covered_call",
+		"protective_put",
+		"conversion",
+		"reverse_conversion",
+		"collar",
+		"long_box_spread",
+		"short_box_spread",
+	}
+	for _, id := range required {
+		if _, present := gotSet[id]; !present {
+			t.Errorf("OptimizerTargets missing expected %q", id)
+		}
+	}
+	// Mutating the returned slice must not affect a subsequent call —
+	// callers receive a defensive copy.
+	if len(got) > 0 {
+		got[0] = "ZZZ_MUTATED"
+		again := rb.OptimizerTargets()
+		if again[0] == "ZZZ_MUTATED" {
+			t.Errorf("OptimizerTargets returns a shared slice; caller mutation leaked")
+		}
+	}
+}
+
+func TestBindSlotsAll_VerticalAmbiguity(t *testing.T) {
+	// Two slots with identical (side, kind) signatures and two legs that
+	// match both. bindSlotsAll must return both leg-permutations; bindSlots
+	// must still return exactly one binding (DFS-first, deterministic).
+	slots := []LegSlot{
+		{Name: "A", Side: "long", Kind: "option"},
+		{Name: "B", Side: "long", Kind: "option"},
+	}
+	legs := []Leg{
+		{Side: Long, Kind: OptionKind, OptionType: "call",
+			K: 100, P: 1.0, P0: 1.0, Qty: 1, Mult: 100},
+		{Side: Long, Kind: OptionKind, OptionType: "call",
+			K: 110, P: 1.0, P0: 1.0, Qty: 1, Mult: 100},
+	}
+
+	all := bindSlotsAll(legs, slots)
+	if len(all) != 2 {
+		t.Fatalf("bindSlotsAll returned %d assignments, want 2: %v", len(all), all)
+	}
+	seen := map[[2]int]bool{}
+	for _, row := range all {
+		if len(row) != 2 {
+			t.Fatalf("bindSlotsAll row has length %d, want 2", len(row))
+		}
+		if row[0] == row[1] {
+			t.Errorf("bindSlotsAll produced non-distinct assignment %v", row)
+		}
+		seen[[2]int{row[0], row[1]}] = true
+	}
+	if !seen[[2]int{0, 1}] || !seen[[2]int{1, 0}] {
+		t.Errorf("bindSlotsAll missing one of {0,1} or {1,0}: %v", all)
+	}
+
+	bound, ok := bindSlots(legs, slots)
+	if !ok {
+		t.Fatalf("bindSlots returned ok=false on ambiguous-but-feasible input")
+	}
+	if len(bound) != 2 {
+		t.Errorf("bindSlots produced %d bindings, want 2", len(bound))
+	}
+	if bound["A"].K == bound["B"].K {
+		t.Errorf("bindSlots produced collapsed binding: both slots got K=%v", bound["A"].K)
 	}
 }
