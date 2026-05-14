@@ -20,6 +20,7 @@
 package recon
 
 import (
+	"bufio"
 	"encoding/csv"
 	"fmt"
 	"io"
@@ -44,41 +45,41 @@ const (
 
 // PositionRow is one row of positions.csv after parsing.
 type PositionRow struct {
-	ID                 string
-	U                  float64
-	Class              string
-	Lev                float64
-	AccountType        engine.AccountType
-	Phase              engine.Phase
-	VendorRequirement  float64
+	ID                string
+	U                 float64
+	Class             string
+	Lev               float64
+	AccountType       engine.AccountType
+	Phase             engine.Phase
+	VendorRequirement float64
 }
 
 // DiffRow is one row of the output diff.csv.
 type DiffRow struct {
-	PositionID         string
-	VendorRequirement  float64
-	EngineRequirement  float64
-	EngineProceeds     float64
-	EngineCashCall     float64
-	Delta              float64 // engine - vendor
-	AbsDelta           float64
-	Verdict            Verdict
-	RuleID             string
-	Error              string
+	PositionID        string
+	VendorRequirement float64
+	EngineRequirement float64
+	EngineProceeds    float64
+	EngineCashCall    float64
+	Delta             float64 // engine - vendor
+	AbsDelta          float64
+	Verdict           Verdict
+	RuleID            string
+	Error             string
 }
 
 // Summary buckets the DiffRow set for a quick human read of the run.
 type Summary struct {
-	Total     int
-	Match     int
-	Diff      int
-	NoRule    int
-	Error     int
+	Total  int
+	Match  int
+	Diff   int
+	NoRule int
+	Error  int
 	// Buckets of |delta| for the DIFF rows.
-	DiffUnder1     int
-	DiffUnder100   int
-	DiffUnder1000  int
-	DiffOver1000   int
+	DiffUnder1    int
+	DiffUnder100  int
+	DiffUnder1000 int
+	DiffOver1000  int
 }
 
 // Options controls comparison behavior.
@@ -100,14 +101,14 @@ func LoadPositions(positionsPath, legsPath string) ([]PositionRow, []engine.Posi
 	if len(rows) < 2 {
 		return nil, nil, fmt.Errorf("positions: file has no data rows")
 	}
-	header := normalize(rows[0])
+	header := normalize(rows[0].Record)
 	pIdx := indexer(header)
 
 	posRows := make([]PositionRow, 0, len(rows)-1)
-	for i, r := range rows[1:] {
-		p, err := parsePositionRow(r, pIdx)
+	for _, r := range rows[1:] {
+		p, err := parsePositionRow(r.Record, pIdx)
 		if err != nil {
-			return nil, nil, fmt.Errorf("positions row %d: %w", i+2, err)
+			return nil, nil, fmt.Errorf("positions line %d: %w", r.Line, err)
 		}
 		posRows = append(posRows, p)
 	}
@@ -205,7 +206,6 @@ func WriteDiff(path string, diffs []DiffRow) error {
 	}
 	defer f.Close()
 	w := csv.NewWriter(f)
-	defer w.Flush()
 	if err := w.Write([]string{
 		"position_id", "vendor_requirement", "engine_requirement",
 		"engine_proceeds", "engine_cash_call", "delta", "abs_delta",
@@ -228,6 +228,10 @@ func WriteDiff(path string, diffs []DiffRow) error {
 		}); err != nil {
 			return err
 		}
+	}
+	w.Flush()
+	if err := w.Error(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -263,43 +267,73 @@ func loadLegs(path string) (map[string][]engine.Leg, error) {
 	if len(rows) < 2 {
 		return map[string][]engine.Leg{}, nil
 	}
-	header := normalize(rows[0])
+	header := normalize(rows[0].Record)
 	idx := indexer(header)
 	type indexed struct {
 		i   int
 		leg engine.Leg
 	}
 	byID := map[string][]indexed{}
-	for i, r := range rows[1:] {
+	for _, row := range rows[1:] {
+		r := row.Record
 		id := idx.str(r, "position_id")
 		if id == "" {
-			return nil, fmt.Errorf("legs row %d: missing position_id", i+2)
+			return nil, fmt.Errorf("legs line %d: missing position_id", row.Line)
 		}
 		leg := engine.Leg{
-			Side:                   engine.Side(idx.str(r, "side")),
-			Kind:                   engine.Kind(idx.str(r, "kind")),
-			OptionType:             idx.str(r, "option_type"),
-			K:                      idx.float(r, "k"),
-			P:                      idx.float(r, "p"),
-			P0:                     idx.float(r, "p0"),
-			Qty:                    idx.float(r, "qty"),
-			Mult:                   idx.float(r, "mult"),
-			Style:                  idx.str(r, "style"),
-			Venue:                  idx.str(r, "venue"),
-			SettleStyle:            idx.str(r, "settle_style"),
-			Expiration:             idx.str(r, "expiration"),
-			Underlying:             idx.str(r, "underlying"),
-			TimeToExpirationMonths: idx.float(r, "time_to_expiration_months"),
-			BrokerGuaranteed:       idx.bool(r, "broker_guaranteed"),
-			Shares:                 idx.float(r, "shares"),
-			ShortSaleProceeds:      idx.float(r, "short_sale_proceeds"),
-			SalePrice:              idx.float(r, "sale_price"),
-			Price:                  idx.float(r, "price"),
-			TracksIndex:            idx.str(r, "tracks_index"),
-			Leveraged:              idx.bool(r, "leveraged"),
-			KEquivalent:            idx.float(r, "k_equivalent"),
+			Side:             engine.Side(idx.str(r, "side")),
+			Kind:             engine.Kind(idx.str(r, "kind")),
+			OptionType:       idx.str(r, "option_type"),
+			Style:            idx.str(r, "style"),
+			Venue:            idx.str(r, "venue"),
+			SettleStyle:      idx.str(r, "settle_style"),
+			Expiration:       idx.str(r, "expiration"),
+			Underlying:       idx.str(r, "underlying"),
+			BrokerGuaranteed: idx.bool(r, "broker_guaranteed"),
+			TracksIndex:      idx.str(r, "tracks_index"),
+			Leveraged:        idx.bool(r, "leveraged"),
 		}
-		legIdx := int(idx.float(r, "leg_index"))
+		// qty and mult are load-bearing: a leg with qty=0 or mult=0
+		// silently zeroes every per-leg requirement. Require them
+		// explicitly so an empty cell errors instead of producing a
+		// degenerate leg. Other float fields (k_equivalent, shares,
+		// short_sale_proceeds, …) are slot-conditional and stay optional.
+		if v, err := idx.requiredFloat(r, "qty"); err != nil {
+			return nil, fmt.Errorf("legs line %d: %w", row.Line, err)
+		} else {
+			leg.Qty = v
+		}
+		if v, err := idx.requiredFloat(r, "mult"); err != nil {
+			return nil, fmt.Errorf("legs line %d: %w", row.Line, err)
+		} else {
+			leg.Mult = v
+		}
+		floatFields := []struct {
+			key string
+			dst *float64
+		}{
+			{"k", &leg.K},
+			{"p", &leg.P},
+			{"p0", &leg.P0},
+			{"time_to_expiration_months", &leg.TimeToExpirationMonths},
+			{"shares", &leg.Shares},
+			{"short_sale_proceeds", &leg.ShortSaleProceeds},
+			{"sale_price", &leg.SalePrice},
+			{"price", &leg.Price},
+			{"k_equivalent", &leg.KEquivalent},
+		}
+		for _, ff := range floatFields {
+			v, err := idx.float(r, ff.key)
+			if err != nil {
+				return nil, fmt.Errorf("legs line %d: %w", row.Line, err)
+			}
+			*ff.dst = v
+		}
+		legIdxF, err := idx.float(r, "leg_index")
+		if err != nil {
+			return nil, fmt.Errorf("legs line %d: %w", row.Line, err)
+		}
+		legIdx := int(legIdxF)
 		byID[id] = append(byID[id], indexed{i: legIdx, leg: leg})
 	}
 	out := map[string][]engine.Leg{}
@@ -316,13 +350,20 @@ func loadLegs(path string) (map[string][]engine.Leg, error) {
 
 func parsePositionRow(r []string, idx indexerMap) (PositionRow, error) {
 	p := PositionRow{
-		ID:                idx.str(r, "position_id"),
-		U:                 idx.float(r, "u"),
-		Class:             idx.str(r, "class"),
-		Lev:               idx.float(r, "lev"),
-		AccountType:       engine.AccountType(strings.ToLower(idx.str(r, "account_type"))),
-		Phase:             engine.Phase(strings.ToLower(idx.str(r, "phase"))),
-		VendorRequirement: idx.float(r, "vendor_requirement"),
+		ID:          idx.str(r, "position_id"),
+		Class:       idx.str(r, "class"),
+		AccountType: engine.AccountType(strings.ToLower(idx.str(r, "account_type"))),
+		Phase:       engine.Phase(strings.ToLower(idx.str(r, "phase"))),
+	}
+	var err error
+	if p.U, err = idx.float(r, "u"); err != nil {
+		return p, err
+	}
+	if p.Lev, err = idx.float(r, "lev"); err != nil {
+		return p, err
+	}
+	if p.VendorRequirement, err = idx.float(r, "vendor_requirement"); err != nil {
+		return p, err
 	}
 	if p.ID == "" {
 		return p, fmt.Errorf("missing position_id")
@@ -336,16 +377,24 @@ func parsePositionRow(r []string, idx indexerMap) (PositionRow, error) {
 	return p, nil
 }
 
-func readCSV(path string) ([][]string, error) {
+// csvRow pairs a CSV record with its original 1-based line number in the
+// source file. Empty rows are skipped, so the slice index alone cannot
+// reproduce the file line; callers that report errors must use Line.
+type csvRow struct {
+	Line   int
+	Record []string
+}
+
+func readCSV(path string) ([]csvRow, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	r := csv.NewReader(f)
+	r := csv.NewReader(stripBOM(f))
 	r.FieldsPerRecord = -1 // tolerate ragged rows; we look up by header name
 	r.TrimLeadingSpace = true
-	var rows [][]string
+	var rows []csvRow
 	for {
 		rec, err := r.Read()
 		if err == io.EOF {
@@ -354,9 +403,36 @@ func readCSV(path string) ([][]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		rows = append(rows, rec)
+		// FieldPos(0) returns the 1-based line of the most-recently-read
+		// record's first field — robust against blank lines that we skip
+		// below and against any future quoted multi-line fields.
+		line, _ := r.FieldPos(0)
+		if allEmpty(rec) {
+			continue
+		}
+		rows = append(rows, csvRow{Line: line, Record: rec})
 	}
 	return rows, nil
+}
+
+// stripBOM drops a leading UTF-8 BOM (\xEF\xBB\xBF) so Excel-exported CSVs
+// don't poison the first header cell.
+func stripBOM(r io.Reader) io.Reader {
+	br := bufio.NewReader(r)
+	b, err := br.Peek(3)
+	if err == nil && len(b) == 3 && b[0] == 0xEF && b[1] == 0xBB && b[2] == 0xBF {
+		_, _ = br.Discard(3)
+	}
+	return br
+}
+
+func allEmpty(rec []string) bool {
+	for _, s := range rec {
+		if strings.TrimSpace(s) != "" {
+			return false
+		}
+	}
+	return true
 }
 
 func normalize(h []string) []string {
@@ -385,16 +461,34 @@ func (m indexerMap) str(row []string, key string) string {
 	return strings.TrimSpace(row[i])
 }
 
-func (m indexerMap) float(row []string, key string) float64 {
+func (m indexerMap) float(row []string, key string) (float64, error) {
 	s := m.str(row, key)
 	if s == "" {
-		return 0
+		return 0, nil
 	}
 	v, err := strconv.ParseFloat(s, 64)
 	if err != nil {
-		return 0
+		return 0, fmt.Errorf("field %q: %w", key, err)
 	}
-	return v
+	return v, nil
+}
+
+// requiredFloat is like float, but rejects empty strings. Use it for fields
+// where 0 has a meaningful effect on the engine (qty, mult): a silent
+// zero-fallback would produce a leg that contributes nothing to the
+// requirement, which looks like a quiet MATCH for shorts the engine never
+// charged. Returns an error naming the field so the caller can wrap it
+// with row context.
+func (m indexerMap) requiredFloat(row []string, key string) (float64, error) {
+	s := m.str(row, key)
+	if s == "" {
+		return 0, fmt.Errorf("field %q: required but empty", key)
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, fmt.Errorf("field %q: %w", key, err)
+	}
+	return v, nil
 }
 
 func (m indexerMap) bool(row []string, key string) bool {

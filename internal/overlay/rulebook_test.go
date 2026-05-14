@@ -46,11 +46,11 @@ func TestLoad_ValidExampleYAML(t *testing.T) {
 func TestLoad_DuplicateRuleIDsAcrossFiles_Rejected(t *testing.T) {
 	a := writeTemp(t, "a.yaml", `schema_version: "1"
 rules:
-  - {id: dupe, scope: account, mode: add, formula: "1.0"}
+  - {id: dupe, scope: position, mode: add, formula: "1.0"}
 `)
 	b := writeTemp(t, "b.yaml", `schema_version: "1"
 rules:
-  - {id: dupe, scope: account, mode: add, formula: "2.0"}
+  - {id: dupe, scope: position, mode: add, formula: "2.0"}
 `)
 	_, err := LoadRulebook(a, b)
 	assertLoaderError(t, err, "duplicate rule id")
@@ -60,7 +60,7 @@ func TestLoad_UnknownYAMLField_Rejected(t *testing.T) {
 	p := writeTemp(t, "x.yaml", `schema_version: "1"
 rules:
   - id: r1
-    scope: account
+    scope: position
     mode: add
     formula: "1.0"
     priorty: 10
@@ -81,7 +81,7 @@ rules:
 func TestLoad_UnknownMode_Rejected(t *testing.T) {
 	p := writeTemp(t, "x.yaml", `schema_version: "1"
 rules:
-  - {id: r1, scope: account, mode: bogus, formula: "1.0"}
+  - {id: r1, scope: position, mode: bogus, formula: "1.0"}
 `)
 	_, err := LoadRulebook(p)
 	assertLoaderError(t, err, "mode")
@@ -90,7 +90,7 @@ rules:
 func TestLoad_UnknownBasis_Rejected(t *testing.T) {
 	p := writeTemp(t, "x.yaml", `schema_version: "1"
 rules:
-  - {id: r1, scope: account, mode: add, basis: gut_feeling, formula: "1.0"}
+  - {id: r1, scope: position, mode: add, basis: gut_feeling, formula: "1.0"}
 `)
 	_, err := LoadRulebook(p)
 	assertLoaderError(t, err, "basis")
@@ -100,7 +100,7 @@ func TestLoad_UnknownAccountType_Rejected(t *testing.T) {
 	p := writeTemp(t, "x.yaml", `schema_version: "1"
 rules:
   - id: r1
-    scope: account
+    scope: position
     mode: add
     formula: "1.0"
     applies:
@@ -114,7 +114,7 @@ func TestLoad_UnknownPhase_Rejected(t *testing.T) {
 	p := writeTemp(t, "x.yaml", `schema_version: "1"
 rules:
   - id: r1
-    scope: account
+    scope: position
     mode: add
     formula: "1.0"
     applies:
@@ -128,7 +128,7 @@ func TestLoad_UnknownInstrumentKind_Rejected(t *testing.T) {
 	p := writeTemp(t, "x.yaml", `schema_version: "1"
 rules:
   - id: r1
-    scope: account
+    scope: position
     mode: add
     formula: "1.0"
     applies:
@@ -142,7 +142,7 @@ func TestLoad_UnknownSide_Rejected(t *testing.T) {
 	p := writeTemp(t, "x.yaml", `schema_version: "1"
 rules:
   - id: r1
-    scope: account
+    scope: position
     mode: add
     formula: "1.0"
     applies:
@@ -164,7 +164,7 @@ rules:
 func TestLoad_WhenReturnsNonBool_Rejected(t *testing.T) {
 	p := writeTemp(t, "x.yaml", `schema_version: "1"
 rules:
-  - {id: r1, scope: account, mode: add, formula: "1.0", when: "5"}
+  - {id: r1, scope: position, mode: add, formula: "1.0", when: "5"}
 `)
 	_, err := LoadRulebook(p)
 	assertLoaderError(t, err, "when must return bool")
@@ -173,7 +173,7 @@ rules:
 func TestLoad_FormulaReturnsBool_Rejected(t *testing.T) {
 	p := writeTemp(t, "x.yaml", `schema_version: "1"
 rules:
-  - {id: r1, scope: account, mode: add, formula: "true"}
+  - {id: r1, scope: position, mode: add, formula: "true"}
 `)
 	_, err := LoadRulebook(p)
 	assertLoaderError(t, err, "formula must return a number")
@@ -182,7 +182,7 @@ rules:
 func TestLoad_FormulaReturnsString_Rejected(t *testing.T) {
 	p := writeTemp(t, "x.yaml", `schema_version: "1"
 rules:
-  - {id: r1, scope: account, mode: add, formula: "\"hi\""}
+  - {id: r1, scope: position, mode: add, formula: "\"hi\""}
 `)
 	_, err := LoadRulebook(p)
 	assertLoaderError(t, err, "formula must return a number")
@@ -193,7 +193,7 @@ func TestLoad_IntegerConstantsNormalizedToFloat64(t *testing.T) {
 constants:
   threshold: 2000
 rules:
-  - {id: r1, scope: account, mode: add, formula: "constants.threshold"}
+  - {id: r1, scope: position, mode: add, formula: "constants.threshold"}
 `)
 	rb, err := LoadRulebook(p)
 	if err != nil {
@@ -212,12 +212,12 @@ func TestLoad_DeterministicOrdering_EqualPriorities(t *testing.T) {
 	// Equal priorities — tie-break must be (fileIndex, declIndex, id).
 	a := writeTemp(t, "a.yaml", `schema_version: "1"
 rules:
-  - {id: zeta, priority: 5, scope: account, mode: add, formula: "1.0"}
-  - {id: alpha, priority: 5, scope: account, mode: add, formula: "1.0"}
+  - {id: zeta, priority: 5, scope: position, mode: add, formula: "1.0"}
+  - {id: alpha, priority: 5, scope: position, mode: add, formula: "1.0"}
 `)
 	b := writeTemp(t, "b.yaml", `schema_version: "1"
 rules:
-  - {id: beta, priority: 5, scope: account, mode: add, formula: "1.0"}
+  - {id: beta, priority: 5, scope: position, mode: add, formula: "1.0"}
 `)
 	rb, err := LoadRulebook(a, b)
 	if err != nil {
@@ -234,7 +234,7 @@ rules:
 func TestLoad_OverlayRulebookHashChangesWhenBytesChange(t *testing.T) {
 	a := writeTemp(t, "a.yaml", `schema_version: "1"
 rules:
-  - {id: r1, scope: account, mode: add, formula: "1.0"}
+  - {id: r1, scope: position, mode: add, formula: "1.0"}
 `)
 	rbA, err := LoadRulebook(a)
 	if err != nil {
@@ -242,7 +242,7 @@ rules:
 	}
 	b := writeTemp(t, "b.yaml", `schema_version: "1"
 rules:
-  - {id: r1, scope: account, mode: add, formula: "2.0"}
+  - {id: r1, scope: position, mode: add, formula: "2.0"}
 `)
 	rbB, err := LoadRulebook(b)
 	if err != nil {
@@ -256,7 +256,7 @@ rules:
 func TestLoad_OnMissingReferenceDefaultsToWarn(t *testing.T) {
 	p := writeTemp(t, "x.yaml", `schema_version: "1"
 rules:
-  - {id: r1, scope: account, mode: add, formula: "1.0"}
+  - {id: r1, scope: position, mode: add, formula: "1.0"}
 `)
 	rb, err := LoadRulebook(p)
 	if err != nil {
@@ -270,7 +270,7 @@ rules:
 func TestLoad_WhenOmittedDefaultsToTrue(t *testing.T) {
 	p := writeTemp(t, "x.yaml", `schema_version: "1"
 rules:
-  - {id: r1, scope: account, mode: add, formula: "1.0"}
+  - {id: r1, scope: position, mode: add, formula: "1.0"}
 `)
 	rb, err := LoadRulebook(p)
 	if err != nil {
@@ -284,7 +284,7 @@ rules:
 func TestLoad_FormulaOmittedOnNonBlockMode_Rejected(t *testing.T) {
 	p := writeTemp(t, "x.yaml", `schema_version: "1"
 rules:
-  - {id: r1, scope: account, mode: add}
+  - {id: r1, scope: position, mode: add}
 `)
 	_, err := LoadRulebook(p)
 	assertLoaderError(t, err, "requires a formula")
@@ -293,7 +293,7 @@ rules:
 func TestLoad_BlockModeMayOmitFormula(t *testing.T) {
 	p := writeTemp(t, "x.yaml", `schema_version: "1"
 rules:
-  - {id: r1, scope: account, mode: block, when: "account.current_equity < 0"}
+  - {id: r1, scope: position, mode: block, when: "account.current_equity < 0"}
 `)
 	rb, err := LoadRulebook(p)
 	if err != nil {
@@ -323,7 +323,7 @@ func TestLoad_EmptyYAMLFileAccepted(t *testing.T) {
 	empty := writeTemp(t, "empty.yaml", "")
 	full := writeTemp(t, "full.yaml", `schema_version: "1"
 rules:
-  - {id: r1, scope: account, mode: add, formula: "1.0"}
+  - {id: r1, scope: position, mode: add, formula: "1.0"}
 `)
 	rb, err := LoadRulebook(empty, full)
 	if err != nil {
@@ -340,7 +340,7 @@ rules:
 func TestLoad_UnsupportedSchemaVersion_Rejected(t *testing.T) {
 	p := writeTemp(t, "x.yaml", `schema_version: "2"
 rules:
-  - {id: r1, scope: account, mode: add, formula: "1.0"}
+  - {id: r1, scope: position, mode: add, formula: "1.0"}
 `)
 	_, err := LoadRulebook(p)
 	assertLoaderError(t, err, "schema_version")
@@ -349,7 +349,7 @@ rules:
 func TestLoad_GroupByOnNonGroupScope_Rejected(t *testing.T) {
 	p := writeTemp(t, "x.yaml", `schema_version: "1"
 rules:
-  - {id: r1, scope: account, group_by: symbol, mode: add, formula: "1.0"}
+  - {id: r1, scope: position, group_by: symbol, mode: add, formula: "1.0"}
 `)
 	_, err := LoadRulebook(p)
 	assertLoaderError(t, err, "group_by")

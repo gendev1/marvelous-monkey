@@ -132,6 +132,12 @@ type groupFacts struct {
 	positionCount int
 	baselineSum   float64
 	positions     []groupMember
+	// missingRefIDs lists member position IDs whose security reference
+	// lookup fell back to the synthetic default. Group rules with
+	// on_missing_reference: "error" use this to mirror the position-path
+	// behavior — emit a HouseViolation for the group and skip
+	// evaluation.
+	missingRefIDs []string
 }
 
 // groupMember is one row of a group's membership list: enough to

@@ -1,6 +1,7 @@
 package recon
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -112,5 +113,69 @@ func TestRecon_validationErrorIsNotNoRule(t *testing.T) {
 	}
 	if !strings.Contains(diffs[0].Error, "invalid position") {
 		t.Errorf("error %q does not contain 'invalid position' prefix", diffs[0].Error)
+	}
+}
+
+// Blank lines before a malformed row must not shift the reported file line:
+// the error message has to point at the actual line in the source CSV, not
+// the index of the row among the non-blank rows. This is what makes recon
+// errors greppable against the file the user is staring at.
+func TestLoadPositions_blankLinesPreserveLineNumber(t *testing.T) {
+	dir := t.TempDir()
+	posPath := filepath.Join(dir, "positions.csv")
+	legsPath := filepath.Join(dir, "legs.csv")
+
+	// Two leading blank lines, then header on line 3, then a row on line 4
+	// whose `u` value is unparseable. Without line-preserving readCSV the
+	// error would say "row 2".
+	pos := "\n\nposition_id,u,class,lev,account_type,phase,vendor_requirement\n" +
+		"POS_bad,not_a_number,equity,1.0,margin,initial,1000\n"
+	if err := os.WriteFile(posPath, []byte(pos), 0o644); err != nil {
+		t.Fatalf("write positions: %v", err)
+	}
+	if err := os.WriteFile(legsPath, []byte("position_id,leg_index,side,kind,qty,mult\n"), 0o644); err != nil {
+		t.Fatalf("write legs: %v", err)
+	}
+
+	_, _, err := LoadPositions(posPath, legsPath)
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "line 4") {
+		t.Errorf("error %q does not reference 'line 4' (the actual file line of the bad row)", err.Error())
+	}
+	// Also assert the buggy old shape is not present.
+	if strings.Contains(err.Error(), "row 2") {
+		t.Errorf("error %q still uses pre-fix 'row 2' wording", err.Error())
+	}
+}
+
+// qty=0 (or empty) is the silent failure mode that prompted this guard: a
+// leg with qty=0 contributes zero to the engine's requirement, so the
+// recon harness would report MATCH for any vendor number when in fact the
+// data is malformed. requiredFloat must reject the empty cell.
+func TestLoadPositions_emptyQtyRejected(t *testing.T) {
+	dir := t.TempDir()
+	posPath := filepath.Join(dir, "positions.csv")
+	legsPath := filepath.Join(dir, "legs.csv")
+
+	pos := "position_id,u,class,lev,account_type,phase,vendor_requirement\n" +
+		"POS_x,100,equity,1.0,margin,initial,1000\n"
+	if err := os.WriteFile(posPath, []byte(pos), 0o644); err != nil {
+		t.Fatalf("write positions: %v", err)
+	}
+	// Empty qty cell on the data row — everything else is well-formed.
+	legs := "position_id,leg_index,side,kind,option_type,k,p,p0,qty,mult\n" +
+		"POS_x,0,short,option,call,120,8.40,8.40,,100\n"
+	if err := os.WriteFile(legsPath, []byte(legs), 0o644); err != nil {
+		t.Fatalf("write legs: %v", err)
+	}
+
+	_, _, err := LoadPositions(posPath, legsPath)
+	if err == nil {
+		t.Fatalf("expected error on empty qty, got nil")
+	}
+	if !strings.Contains(err.Error(), "qty") {
+		t.Errorf("error %q does not mention the offending field 'qty'", err.Error())
 	}
 }

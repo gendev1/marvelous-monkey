@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"os"
@@ -114,6 +115,7 @@ var (
 
 type rawRulebook struct {
 	SchemaVersion string                        `yaml:"schema_version"`
+	Source        any                           `yaml:"source,omitempty"`
 	Rates         map[string]map[string]float64 `yaml:"rates"`
 	Rules         []Rule                        `yaml:"rules"`
 	Constants     map[string]any                `yaml:"constants,omitempty"`
@@ -137,7 +139,9 @@ func LoadRulebook(path string) (*Rulebook, error) {
 		return nil, fmt.Errorf("read rules: %w", err)
 	}
 	var raw rawRulebook
-	if err := yaml.Unmarshal(data, &raw); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("parse rules: %w", err)
 	}
 	if err := validateRawRulebook(raw); err != nil {
@@ -151,6 +155,16 @@ func LoadRulebook(path string) (*Rulebook, error) {
 		case int:
 			constants[k] = float64(x)
 		case int64:
+			constants[k] = float64(x)
+		case int32:
+			constants[k] = float64(x)
+		case uint:
+			constants[k] = float64(x)
+		case uint32:
+			constants[k] = float64(x)
+		case uint64:
+			constants[k] = float64(x)
+		case float32:
 			constants[k] = float64(x)
 		default:
 			constants[k] = v
@@ -225,6 +239,19 @@ func formulaExprs(r Rule) map[string]string {
 		"margin.initial_proceeds":     r.Formulas.Margin.InitialProceeds,
 		"margin.maintenance_proceeds": r.Formulas.Margin.MaintenanceProceeds,
 	}
+}
+
+// lookupProg returns a pre-compiled program by cache key. It does NOT write to
+// rb.progs; calling it at Evaluate time keeps Rulebook concurrent-safe per the
+// CLAUDE.md invariant. Panics if the key is missing — LoadRulebook is
+// responsible for pre-compiling every formula, constraint, and min_fields gte
+// expression, so a miss here is a programming error (cache key drift).
+func (rb *Rulebook) lookupProg(key string) cel.Program {
+	prog, ok := rb.progs[key]
+	if !ok {
+		panic(fmt.Sprintf("engine: program %q not pre-compiled; LoadRulebook must populate every cache key before Evaluate", key))
+	}
+	return prog
 }
 
 func (rb *Rulebook) compile(key, expr string, kind exprKind) (cel.Program, error) {
@@ -679,13 +706,21 @@ func requireSameContractSize(ruleID string, bound map[string]Leg, slots ...strin
 }
 
 func requireExpirationSlots(ruleID string, bound map[string]Leg, slots ...string) error {
-	for _, slot := range slots {
+	var want string
+	for i, slot := range slots {
 		exp := bound[slot].Expiration
 		if exp == "" {
 			return fmt.Errorf("invalid position: rule %s requires legs.%s.expiration", ruleID, slot)
 		}
 		if _, err := time.Parse("2006-01-02", exp); err != nil {
 			return fmt.Errorf("invalid position: rule %s requires legs.%s.expiration as YYYY-MM-DD, got %q", ruleID, slot, exp)
+		}
+		if i == 0 {
+			want = exp
+			continue
+		}
+		if exp != want {
+			return fmt.Errorf("invalid position: slot %q has expiration %q, expected %q", slot, exp, want)
 		}
 	}
 	return nil
@@ -868,15 +903,10 @@ func (rb *Rulebook) validateRequirements(ruleID string, spec RequireSpec, bound 
 		if err != nil {
 			return err
 		}
-		// Cache key matches LoadRulebook's pre-compile (include gte text so
-		// two entries sharing (slot, field) don't collide). Pre-compile in
-		// LoadRulebook makes this a map hit; the fallback covers tests that
-		// build a Rulebook without going through LoadRulebook.
+		// LoadRulebook pre-compiles every min_fields gte expression into
+		// rb.progs; lookupProg is read-only so Evaluate stays concurrent-safe.
 		key := ruleID + "/req:gte:" + mf.Slot + "." + mf.Field + ":" + mf.GTE
-		prog, cerr := rb.compile(key, mf.GTE, kindFormula)
-		if cerr != nil {
-			return fmt.Errorf("invalid rulebook: rule %s min_fields legs.%s.%s gte %q: %w", ruleID, mf.Slot, mf.Field, mf.GTE, cerr)
-		}
+		prog := rb.lookupProg(key)
 		out, _, eerr := prog.Eval(activation)
 		if eerr != nil {
 			return fmt.Errorf("invalid position: rule %s min_fields legs.%s.%s gte %q: %w", ruleID, mf.Slot, mf.Field, mf.GTE, eerr)
@@ -970,10 +1000,7 @@ func (rb *Rulebook) evaluateOne(pos Position, rule Rule, accountType AccountType
 	// Constraints. A clean `false` demotes to "doesn't match"; a CEL eval
 	// error is surfaced (likely a rule bug).
 	for _, c := range rule.Match.Constraints {
-		prog, err := rb.compile(rule.ID+"/c:"+c, c, kindConstraint)
-		if err != nil {
-			return Result{}, false, fmt.Errorf("compile constraint %s %q: %w", rule.ID, c, err)
-		}
+		prog := rb.lookupProg(rule.ID + "/c:" + c)
 		out, _, err := prog.Eval(activation)
 		if err != nil {
 			return Result{}, false, fmt.Errorf("eval constraint %s %q: %w", rule.ID, c, err)
@@ -1029,10 +1056,7 @@ func (rb *Rulebook) evaluateOne(pos Position, rule Rule, accountType AccountType
 		return Result{}, false, fmt.Errorf("rule %s has no %s formula", rule.ID, formulaKey)
 	}
 
-	prog, err := rb.compile(rule.ID+"/"+formulaKey, expr, kindFormula)
-	if err != nil {
-		return Result{}, false, fmt.Errorf("compile %s: %w", rule.ID, err)
-	}
+	prog := rb.lookupProg(rule.ID + "/" + formulaKey)
 	out, _, err := prog.Eval(activation)
 	if err != nil {
 		return Result{}, false, fmt.Errorf("eval %s: %w", rule.ID, err)
@@ -1044,10 +1068,7 @@ func (rb *Rulebook) evaluateOne(pos Position, rule Rule, accountType AccountType
 
 	var proceeds float64
 	if proceedsExpr != "" {
-		pprog, err := rb.compile(rule.ID+"/"+proceedsKey, proceedsExpr, kindFormula)
-		if err != nil {
-			return Result{}, false, fmt.Errorf("compile %s %s: %w", rule.ID, proceedsKey, err)
-		}
+		pprog := rb.lookupProg(rule.ID + "/" + proceedsKey)
 		pout, _, err := pprog.Eval(activation)
 		if err != nil {
 			return Result{}, false, fmt.Errorf("eval %s %s: %w", rule.ID, proceedsKey, err)

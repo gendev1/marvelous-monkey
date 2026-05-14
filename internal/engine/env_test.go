@@ -145,9 +145,9 @@ func TestForEachLeg_emptyMapIsNoop(t *testing.T) {
 	if got := sumPremiums(legs, "P", Long); got != types.Double(0) {
 		t.Fatalf("sumPremiums(P, long) on empty map: got %v, want 0", got)
 	}
-	if got := isLimitedRisk(legs); got != types.Bool(true) {
-		// Vacuously: no non-option legs, zero net call exposure ≥ 0.
-		t.Fatalf("isLimitedRisk on empty map: got %v, want true", got)
+	if got := isLimitedRisk(legs); got != types.Bool(false) {
+		// Empty legs are not "limited risk" — there is no option position to bound.
+		t.Fatalf("isLimitedRisk on empty map: got %v, want false", got)
 	}
 }
 

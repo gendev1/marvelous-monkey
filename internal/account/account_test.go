@@ -7,9 +7,12 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"margincalc/internal/engine"
 )
+
+var testAsOf = time.Date(2025, 1, 2, 15, 4, 5, 0, time.UTC)
 
 func assertClose(t *testing.T, label string, got, want float64) {
 	t.Helper()
@@ -38,6 +41,8 @@ func minimalAccount() Account {
 		ID:          "acct-1",
 		AccountType: engine.MarginAccount,
 		Phase:       engine.Initial,
+		Currency:    "USD",
+		AsOf:        testAsOf,
 		Positions:   []AccountPosition{longStockPosition()},
 	}
 }
@@ -448,6 +453,8 @@ func emptyAccount() Account {
 		ID:          "acct-empty",
 		AccountType: engine.MarginAccount,
 		Phase:       engine.Initial,
+		Currency:    "USD",
+		AsOf:        testAsOf,
 	}
 }
 
@@ -521,6 +528,73 @@ func TestAggregate_adjustedBalance(t *testing.T) {
 	}
 	if wantAdj != 100_000-10_000+1_000 {
 		t.Fatalf("hand-computed AdjustedBalance want 91000, got %v", wantAdj)
+	}
+}
+
+func TestAggregate_adjustedBalanceWithShortStock(t *testing.T) {
+	a := emptyAccount()
+	a.SODEquity = 100_000
+
+	shortStock := AccountPosition{
+		ID: "short-stock",
+		Position: engine.Position{
+			U:     50,
+			Class: "equity",
+			Legs: []engine.Leg{{
+				Side:   engine.Short,
+				Kind:   engine.StockKind,
+				Shares: 100,
+			}},
+		},
+	}
+	shortCall := AccountPosition{
+		ID: "short-call",
+		Position: engine.Position{
+			U:     100,
+			Class: "equity",
+			Legs:  []engine.Leg{optionLeg(engine.Short, 5, 2, 100)},
+		},
+	}
+	a.Positions = []AccountPosition{shortStock, shortCall}
+
+	snap, err := Aggregate(a, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	wantSMVStock := 100.0 * 50.0
+	wantSMVOption := 5.0 * 2.0 * 100.0
+	if snap.SMVStock != wantSMVStock {
+		t.Fatalf("SMVStock want %v, got %v", wantSMVStock, snap.SMVStock)
+	}
+	if snap.SMVOption != wantSMVOption {
+		t.Fatalf("SMVOption want %v, got %v", wantSMVOption, snap.SMVOption)
+	}
+	wantAdj := snap.CurrentEquity - snap.LMVStock - snap.LMVOption + snap.SMVStock + snap.SMVOption
+	if snap.AdjustedBalance != wantAdj {
+		t.Fatalf("AdjustedBalance want %v, got %v", wantAdj, snap.AdjustedBalance)
+	}
+	if wantAdj != 100_000+5_000+1_000 {
+		t.Fatalf("hand-computed AdjustedBalance want 106000, got %v", wantAdj)
+	}
+}
+
+func TestValidate_rejectsEmptyCurrency(t *testing.T) {
+	a := minimalAccount()
+	a.Currency = ""
+	err := validate(a)
+	assertInvalidAccount(t, err)
+	if !strings.Contains(err.Error(), "currency") {
+		t.Fatalf("expected error containing %q, got %v", "currency", err)
+	}
+}
+
+func TestValidate_rejectsZeroAsOf(t *testing.T) {
+	a := minimalAccount()
+	a.AsOf = time.Time{}
+	err := validate(a)
+	assertInvalidAccount(t, err)
+	if !strings.Contains(err.Error(), "as_of") {
+		t.Fatalf("expected error containing %q, got %v", "as_of", err)
 	}
 }
 
@@ -939,6 +1013,8 @@ func TestAggregateWithRulebook_marginAccountMixedPositions(t *testing.T) {
 		ID:          "acct-mixed",
 		AccountType: engine.MarginAccount,
 		Phase:       engine.Initial,
+		Currency:    "USD",
+		AsOf:        testAsOf,
 		SODEquity:   100000,
 		CashBalance: 100000,
 		Positions: []AccountPosition{
@@ -1011,6 +1087,8 @@ func TestAggregateWithRulebook_errorDoesNotShortCircuit(t *testing.T) {
 		ID:          "acct-partial",
 		AccountType: engine.MarginAccount,
 		Phase:       engine.Initial,
+		Currency:    "USD",
+		AsOf:        testAsOf,
 		SODEquity:   50000,
 		Positions: []AccountPosition{
 			shortPutOTMPosition(),

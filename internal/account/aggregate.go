@@ -2,6 +2,7 @@ package account
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	"margincalc/internal/engine"
@@ -133,15 +134,22 @@ func Aggregate(account Account, evals []PositionEvaluation) (AccountSnapshot, er
 	snap.CurrentEquity = account.SODEquity + account.PnL + account.DepositsWithdrawals
 	snap.NetMV = snap.LMVStock + snap.LMVOption - snap.SMVStock - snap.SMVOption
 	snap.GrossExposure = snap.LMVStock + snap.LMVOption + snap.SMVStock + snap.SMVOption
-	snap.AdjustedBalance = snap.CurrentEquity - (snap.LMVStock + snap.LMVOption) + snap.SMVOption
+	snap.AdjustedBalance = snap.CurrentEquity - (snap.LMVStock + snap.LMVOption) + snap.SMVStock + snap.SMVOption
 
-	if snap.CurrentEquity <= 0 {
+	switch {
+	case snap.CurrentEquity <= 0:
 		snap.StockLeverage = 0
 		snap.GrossLeverage = 0
 		snap.EquityRatio = 0
 		snap.Warnings = append(snap.Warnings,
 			fmt.Sprintf("current_equity=%g <= 0; leverage and equity_ratio set to 0", snap.CurrentEquity))
-	} else {
+	case snap.CurrentEquity < 1.0:
+		snap.StockLeverage = math.Inf(1)
+		snap.GrossLeverage = math.Inf(1)
+		snap.EquityRatio = math.Inf(1)
+		snap.Warnings = append(snap.Warnings,
+			fmt.Sprintf("current_equity=%g < 1.0; leverage and equity_ratio set to +Inf", snap.CurrentEquity))
+	default:
 		snap.StockLeverage = (snap.LMVStock + snap.SMVStock) / snap.CurrentEquity
 		snap.GrossLeverage = snap.GrossExposure / snap.CurrentEquity
 		snap.EquityRatio = snap.TotalRequirement / snap.CurrentEquity

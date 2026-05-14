@@ -140,6 +140,8 @@ rules:
     match:
       legs:
         - { name: opt, side: short, kind: option, option_type: call }
+    requires:
+      positive_fields: { opt: [K, qty, mult] }
     formulas:
       cash:
         # Manual: deposit the underlying (or escrow receipt). The USD-equivalent
@@ -177,6 +179,8 @@ rules:
     match:
       legs:
         - { name: opt, side: short, kind: option, option_type: put }
+    requires:
+      positive_fields: { opt: [K, qty, mult] }
     formulas:
       cash:
         # Manual: "deposit cash or cash-equivalents equal to the aggregate
@@ -646,6 +650,10 @@ rules:
       legs:
         - { name: sc,   side: short, kind: option,      option_type: call }
         - { name: conv, side: long,  kind: convertible }
+    requires:
+      positive_fields:
+        conv: [price, shares, K_equivalent]
+        sc: [K, qty, mult]
     formulas:
       cash:
         # "Pay for the convertible security in full."
@@ -673,6 +681,10 @@ rules:
       legs:
         - { name: sc, side: short, kind: option,  option_type: call }
         - { name: wt, side: long,  kind: warrant }
+    requires:
+      positive_fields:
+        wt: [price, shares, K_equivalent]
+        sc: [K, qty, mult]
     formulas:
       cash:
         # Not permitted in a cash account.

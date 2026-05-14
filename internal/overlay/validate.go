@@ -7,9 +7,7 @@ import "fmt"
 // loader validated against.
 var (
 	validScopes = map[string]struct{}{
-		"account":  {},
 		"position": {},
-		"symbol":   {},
 		"group":    {},
 	}
 	validModes = map[string]struct{}{
@@ -74,7 +72,11 @@ func validateRawRule(path string, idx int, r rawRule) error {
 		return fmt.Errorf("invalid overlay rulebook: rule %q scope is required", r.ID)
 	}
 	if _, ok := validScopes[r.Scope]; !ok {
-		return fmt.Errorf("invalid overlay rulebook: rule %q scope %q is not one of account/position/symbol/group", r.ID, r.Scope)
+		// Evaluate only dispatches position- and group-scope rules
+		// today. account/symbol scopes are reserved but not yet
+		// supported; surface a hard error so a YAML author doesn't
+		// silently get a skipped rule.
+		return fmt.Errorf("invalid overlay rulebook: rule %q scope %q is not one of position/group", r.ID, r.Scope)
 	}
 	if r.Mode == "" {
 		return fmt.Errorf("invalid overlay rulebook: rule %q mode is required", r.ID)

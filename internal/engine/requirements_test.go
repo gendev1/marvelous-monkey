@@ -382,3 +382,68 @@ func TestRequires_DualPathSamePass(t *testing.T) {
 	res2 := mustEvaluate(t, rb, pos2, MarginAccount, Initial)
 	assertClose(t, "p47 covered call via requires path", res2.Requirement, 4619.00)
 }
+
+// The following four tests exercise the requires blocks added to
+// short_call_uncovered, short_put_uncovered, short_call_long_convertible,
+// and short_call_long_warrant in rules/cboe_baseline.yaml. For three of the
+// four (option K/qty/mult, convertible/warrant price/shares, warrant
+// K_equivalent), validateLeg pre-rejects the malformed leg before
+// validateRequirements gets a chance — so the test fails with the
+// "invalid position:" prefix via the universal validator. The convertible
+// K_equivalent case is the one where the new positive_fields entry is the
+// sole guard: validateLeg does not enforce K_equivalent on ConvertibleKind.
+
+func TestRequires_ShortCallUncovered_NonPositiveQtyRejected(t *testing.T) {
+	rb := loadRB(t)
+	pos := Position{
+		U: 100, Class: "equity",
+		Legs: []Leg{
+			{Side: Short, Kind: OptionKind, OptionType: "call", K: 100, P: 1, P0: 1, Qty: 0, Mult: 100},
+		},
+	}
+	_, err := rb.Evaluate(pos, MarginAccount, Initial)
+	assertInvalidPosition(t, err, "qty")
+}
+
+func TestRequires_ShortPutUncovered_NonPositiveKRejected(t *testing.T) {
+	rb := loadRB(t)
+	pos := Position{
+		U: 100, Class: "equity",
+		Legs: []Leg{
+			{Side: Short, Kind: OptionKind, OptionType: "put", K: 0, P: 1, P0: 1, Qty: 1, Mult: 100},
+		},
+	}
+	_, err := rb.Evaluate(pos, MarginAccount, Initial)
+	assertInvalidPosition(t, err, "K")
+}
+
+// short_call_long_convertible: convertible K_equivalent is NOT pre-validated
+// by validateLeg (only warrant's is), so this test's only guard is the new
+// requires.positive_fields entry on conv.K_equivalent. Removing the requires
+// block from the rule would let this position fall through to the rule's
+// formulas with K_equivalent silently zero.
+func TestRequires_ShortCallLongConvertible_ZeroKEquivalentRejected(t *testing.T) {
+	rb := loadRB(t)
+	pos := Position{
+		U: 100, Class: "equity",
+		Legs: []Leg{
+			{Side: Short, Kind: OptionKind, OptionType: "call", K: 100, P: 1, P0: 1, Qty: 1, Mult: 100, Underlying: "XYZ"},
+			{Side: Long, Kind: ConvertibleKind, Price: 50, Shares: 100, KEquivalent: 0, Underlying: "XYZ"},
+		},
+	}
+	_, err := rb.Evaluate(pos, MarginAccount, Initial)
+	assertInvalidPosition(t, err, "short_call_long_convertible", "legs.conv.K_equivalent")
+}
+
+func TestRequires_ShortCallLongWarrant_NonPositiveSharesRejected(t *testing.T) {
+	rb := loadRB(t)
+	pos := Position{
+		U: 100, Class: "equity",
+		Legs: []Leg{
+			{Side: Short, Kind: OptionKind, OptionType: "call", K: 100, P: 1, P0: 1, Qty: 1, Mult: 100, Underlying: "XYZ"},
+			{Side: Long, Kind: WarrantKind, Price: 50, Shares: 0, KEquivalent: 90, Underlying: "XYZ"},
+		},
+	}
+	_, err := rb.Evaluate(pos, MarginAccount, Initial)
+	assertInvalidPosition(t, err, "shares")
+}

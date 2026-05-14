@@ -418,28 +418,37 @@ rules:
 	}
 }
 
-func TestEvaluate_NonPositionScopeIgnored(t *testing.T) {
-	rb := loadRules(t, `schema_version: "1"
+func TestEvaluate_AccountOrSymbolScope_RejectedAtLoad(t *testing.T) {
+	// Evaluate only dispatches position- and group-scope rules. The
+	// loader rejects account/symbol scopes outright rather than letting
+	// them load and silently no-op, so authors notice the gap.
+	cases := []struct {
+		name, scope string
+	}{
+		{"account", "account"},
+		{"symbol", "symbol"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTemp(t, "rules.yaml", `schema_version: "1"
 rules:
-  - id: account_floor
-    scope: account
+  - id: r1
+    scope: `+tc.scope+`
     mode: floor
     basis: account_equity
     formula: "2000.0"
 `)
-	p := stockPosition("p1", "AAPL", engine.Long, 100, 150)
-	acct := baseAccount(p)
-	snap := baseSnapshot(acct, []account.PositionEvaluation{{
-		PositionID: "p1",
-		Result:     engine.Result{Requirement: 100, CashCall: 100},
-	}})
-	e := &Engine{Rulebook: rb}
-	out, _ := e.Evaluate(acct, snap, ReferenceData{})
-	if len(out.Components) != 0 {
-		t.Errorf("non-position rule should be skipped this issue: %v", out.Components)
-	}
-	if out.HouseRequirement != 100 {
-		t.Errorf("HouseRequirement = %v, want 100", out.HouseRequirement)
+			_, err := LoadRulebook(path)
+			if err == nil {
+				t.Fatalf("LoadRulebook(scope=%q): expected error, got nil", tc.scope)
+			}
+			if !strings.Contains(err.Error(), tc.scope) {
+				t.Errorf("error %q does not name the rejected scope %q", err.Error(), tc.scope)
+			}
+			if !strings.Contains(err.Error(), "position/group") {
+				t.Errorf("error %q does not list the supported scopes (position/group)", err.Error())
+			}
+		})
 	}
 }
 
@@ -784,6 +793,89 @@ rules:
 	}
 	if out.HouseRequirement != 7 {
 		t.Errorf("HouseRequirement = %v, want 7 (only warn_rule contributes)", out.HouseRequirement)
+	}
+}
+
+// TestEvaluate_GroupMissingReference_ErrorPolicy_EmitsViolationAndSuppressesMemberWarning
+// covers the group-scope mirror of D3: when a group-scope rule carries
+// on_missing_reference: error and any member position has missing
+// reference data, evaluateGroupRule emits a single group-keyed
+// HouseViolation and suppresses the per-member missing-ref warning that
+// would otherwise fire for those positions.
+func TestEvaluate_GroupMissingReference_ErrorPolicy_EmitsViolationAndSuppressesMemberWarning(t *testing.T) {
+	rb := loadRules(t, `schema_version: "1"
+rules:
+  - id: group_error_rule
+    scope: group
+    group_by: underlying
+    mode: add
+    basis: group_gross_mv
+    formula: "group.gross_market_value * 0.10"
+    on_missing_reference: error
+`)
+	// Two positions sharing the same underlying so they fall in one
+	// bucket. Reference data is empty, so both members will have
+	// secMissing=true.
+	p1 := stockPosition("p1", "XYZ", engine.Long, 100, 50)
+	p2 := stockPosition("p2", "XYZ", engine.Long, 100, 50)
+	acct := baseAccount(p1, p2)
+	snap := baseSnapshot(acct, []account.PositionEvaluation{
+		{PositionID: "p1", Result: engine.Result{Requirement: 25, CashCall: 25}},
+		{PositionID: "p2", Result: engine.Result{Requirement: 25, CashCall: 25}},
+	})
+
+	e := &Engine{Rulebook: rb}
+	out, err := e.Evaluate(acct, snap, ReferenceData{})
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+
+	// Exactly one violation, group-scoped to the bucket key, naming
+	// the rule and the missing-ref policy.
+	if len(out.Violations) != 1 {
+		t.Fatalf("Violations = %d, want 1; got %+v", len(out.Violations), out.Violations)
+	}
+	v := out.Violations[0]
+	if v.RuleID != "group_error_rule" {
+		t.Errorf("Violation.RuleID = %q, want group_error_rule", v.RuleID)
+	}
+	if v.Scope != "group" {
+		t.Errorf("Violation.Scope = %q, want group", v.Scope)
+	}
+	if v.GroupKey != "XYZ" {
+		t.Errorf("Violation.GroupKey = %q, want XYZ", v.GroupKey)
+	}
+	if v.PositionID != "" {
+		t.Errorf("group-scope violation should not pin a PositionID, got %q", v.PositionID)
+	}
+	if !strings.Contains(v.Message, "reference data missing") {
+		t.Errorf("Violation.Message = %q, want it to mention the missing-ref policy", v.Message)
+	}
+	if !strings.Contains(v.Message, "group_error_rule") {
+		t.Errorf("Violation.Message = %q, want it to name the rule", v.Message)
+	}
+
+	// The rule must not contribute to the requirement (it was skipped).
+	for _, c := range out.Components {
+		if c.RuleID == "group_error_rule" {
+			t.Errorf("group_error_rule should not emit a component, got %+v", c)
+		}
+	}
+	if out.HouseRequirement != snap.TotalRequirement {
+		t.Errorf("HouseRequirement = %v, want %v (error-skipped rule must not contribute)",
+			out.HouseRequirement, snap.TotalRequirement)
+	}
+
+	// Per D3: the per-member missing-ref warning must be suppressed
+	// for any position covered by the group's error-policy violation,
+	// so the same condition isn't reported twice.
+	for _, w := range out.Warnings {
+		if strings.Contains(w, "p1") || strings.Contains(w, "XYZ") {
+			t.Errorf("expected no duplicate missing-ref warning for marked members, got %q", w)
+		}
+	}
+	if len(out.Warnings) != 0 {
+		t.Errorf("Warnings = %v, want none (group-scope error policy replaces the per-member warning)", out.Warnings)
 	}
 }
 

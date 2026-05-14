@@ -290,11 +290,13 @@ func payoffAt(opts []Leg, U float64) float64 {
 func isLimitedRisk(legsVal ref.Val) ref.Val {
 	netCallExposure := 0.0
 	limited := true
+	sawOption := false
 	if err := forEachLeg(legsVal, func(l Leg) bool {
 		if l.Kind != OptionKind {
 			limited = false
 			return false // short-circuit
 		}
+		sawOption = true
 		if l.OptionType == "call" {
 			sign := 1.0
 			if l.Side == Short {
@@ -305,6 +307,9 @@ func isLimitedRisk(legsVal ref.Val) ref.Val {
 		return true
 	}); err != nil {
 		return err
+	}
+	if !sawOption {
+		return types.Bool(false)
 	}
 	return types.Bool(limited && netCallExposure >= 0)
 }

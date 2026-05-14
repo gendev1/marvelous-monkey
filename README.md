@@ -43,7 +43,7 @@ margincalc/
 │
 ├── rules/
 │   ├── cboe_baseline.yaml     regulatory baseline rule set
-│   └── house_rules.example.yaml   schema template for the firm's rules
+│   └── house_rules.notes.md       schema sketch for the firm's rules (docs only)
 │
 └── docs/
     └── epics/                 implementation notes by workstream
@@ -129,7 +129,7 @@ See `ROADMAP.md` (Layer 2) for the deeper rationale and the path to account-leve
 
 ## The rule set
 
-`rules/cboe_baseline.yaml` is the regulatory baseline. Your firm's actual production rules are stricter and live (today) inside the vendor; encode them in `rules/house_rules.yaml` using the schema in `rules/house_rules.example.yaml` as you discover them via reconciliation.
+`rules/cboe_baseline.yaml` is the regulatory baseline. Your firm's actual production rules are stricter and live (today) inside the vendor; encode them in `rules/house_rules.yaml` using the schema sketched in `rules/house_rules.notes.md` (docs-only until the multi-file Layer-1 loader lands) as you discover them via reconciliation.
 
 ### Adding a rule
 

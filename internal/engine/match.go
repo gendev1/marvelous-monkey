@@ -18,6 +18,9 @@ import (
 //   - legs: [...] — explicit slot list with fixed cardinality.
 func (rb *Rulebook) tryMatch(pos Position, rule Rule) (map[string]Leg, bool) {
 	if rule.Match.LegsPattern == "all_options" {
+		if len(pos.Legs) == 0 {
+			return nil, false
+		}
 		bound := map[string]Leg{}
 		for i, l := range pos.Legs {
 			if l.Kind != OptionKind {
@@ -68,7 +71,7 @@ const maxSlots = 16
 // allocated, sized exactly to len(slots).
 func bindSlots(legs []Leg, slots []LegSlot) (map[string]Leg, bool) {
 	n := len(slots)
-	if n == 0 || len(legs) > maxSlots {
+	if n == 0 || n > maxSlots || len(legs) > maxSlots {
 		return nil, false
 	}
 

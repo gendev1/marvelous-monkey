@@ -30,6 +30,14 @@ func validate(account Account) error {
 		return fmt.Errorf("invalid account: ID is required")
 	}
 
+	if account.Currency == "" {
+		return fmt.Errorf("invalid account: id=%q currency is required", account.ID)
+	}
+
+	if account.AsOf.IsZero() {
+		return fmt.Errorf("invalid account: id=%q as_of is required", account.ID)
+	}
+
 	switch account.AccountType {
 	case engine.CashAccount, engine.MarginAccount:
 	default:

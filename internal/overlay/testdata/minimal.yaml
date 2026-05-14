@@ -8,11 +8,11 @@ constants:
 rules:
   - id: small_account_floor
     priority: 10
-    scope: account
+    scope: position
     mode: floor
-    basis: account_equity
+    basis: market_value
     formula: "constants.small_account_floor"
-    reason: "minimum account equity floor"
+    reason: "minimum per-position floor"
 
   - id: concentrated_position_addon
     priority: 20

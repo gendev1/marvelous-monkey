@@ -27,7 +27,7 @@ func main() {
 		posPath   = flag.String("positions", "positions.csv", "path to positions.csv")
 		legsPath  = flag.String("legs", "legs.csv", "path to legs.csv")
 		outPath   = flag.String("out", "diff.csv", "path to write diff.csv")
-		tol       = flag.Float64("tolerance", 0.01, "absolute |delta| under which a position counts as MATCH")
+		tol       = flag.Float64("tolerance", 0.0, "absolute |delta| under which a position counts as MATCH; defaults to exact match — pass -tolerance 0.01 for $0.01 slack")
 	)
 	flag.Parse()
 

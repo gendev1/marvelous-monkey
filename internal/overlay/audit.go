@@ -38,6 +38,9 @@ type AuditEntry struct {
 	Amount  float64
 	Delta   float64
 
+	Reason             string
+	OnMissingReference string
+
 	Inputs map[string]float64
 }
 
@@ -46,11 +49,13 @@ type AuditEntry struct {
 // in by the caller because they vary per scope.
 func newAuditEntry(rule overlayRule) AuditEntry {
 	return AuditEntry{
-		RuleID:   rule.ID,
-		Priority: rule.Priority,
-		Scope:    rule.Scope,
-		Mode:     rule.Mode,
-		Formula:  rule.Formula,
+		RuleID:             rule.ID,
+		Priority:           rule.Priority,
+		Scope:              rule.Scope,
+		Mode:               rule.Mode,
+		Formula:            rule.Formula,
+		Reason:             rule.Reason,
+		OnMissingReference: rule.OnMissingReference,
 	}
 }
 

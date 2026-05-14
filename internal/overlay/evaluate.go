@@ -161,7 +161,7 @@ func (e *Engine) Evaluate(
 		case "position":
 			evaluatePositionRule(rule, entries, acct, acctAct, rb.constants, &out, emittedRefViolation)
 		case "group":
-			evaluateGroupRule(rule, entries, acct, acctAct, rb.constants, &out)
+			evaluateGroupRule(rule, entries, acct, acctAct, rb.constants, &out, emittedRefViolation)
 		}
 	}
 
@@ -305,6 +305,7 @@ func evaluateGroupRule(
 	acctAct map[string]any,
 	consts map[string]any,
 	out *HouseRequirement,
+	emittedRefViolation map[string]bool,
 ) {
 	// Account-level applies filters (account_types, phases) gate the
 	// rule wholesale; the position-level filters (instrument_kinds,
@@ -337,6 +338,9 @@ func evaluateGroupRule(
 		g.positionCount++
 		g.baselineSum += entry.baseRq
 		g.positions = append(g.positions, groupMember{id: entry.pos.ID, baselineReq: entry.baseRq})
+		if entry.secMissing {
+			g.missingRefIDs = append(g.missingRefIDs, entry.pos.ID)
+		}
 	}
 	if len(buckets) == 0 {
 		return
@@ -353,6 +357,29 @@ func evaluateGroupRule(
 		ae := newAuditEntry(rule)
 		ae.GroupKey = g.key
 		ae.Symbol = g.key
+
+		// D3 mirror for group scope: if any member position has missing
+		// reference data and the rule's policy is "error", emit one
+		// HouseViolation for the group, mark the affected members so the
+		// lazy missing-ref warning is suppressed for them, and skip
+		// evaluation. Audit row records the consideration with
+		// Matched=false (when never ran).
+		if rule.OnMissingReference == "error" && len(g.missingRefIDs) > 0 {
+			out.Violations = append(out.Violations, HouseViolation{
+				RuleID:   rule.ID,
+				Scope:    rule.Scope,
+				GroupKey: g.key,
+				Message: fmt.Sprintf(
+					"reference data missing for group %q members %v; rule %q requires reference data",
+					g.key, g.missingRefIDs, rule.ID,
+				),
+			})
+			for _, id := range g.missingRefIDs {
+				emittedRefViolation[id] = true
+			}
+			out.Audit.Entries = append(out.Audit.Entries, ae)
+			continue
+		}
 
 		activation := map[string]any{
 			"account":   acctAct,
