@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"math"
 	"os"
 	"strings"
@@ -1304,5 +1305,101 @@ func TestBindSlotsAll_VerticalAmbiguity(t *testing.T) {
 	}
 	if bound["A"].K == bound["B"].K {
 		t.Errorf("bindSlots produced collapsed binding: both slots got K=%v", bound["A"].K)
+	}
+}
+
+// TestRequiresErrorTypedSentinel exercises the *RequiresError sentinel that
+// issue #70 introduced: a `positive_fields` failure must be discoverable via
+// errors.As so the optimizer can demote a guard-fail to "rule does not apply"
+// rather than treating it as a hard CEL/lookup error.
+func TestRequiresErrorTypedSentinel(t *testing.T) {
+	rb := loadRB(t)
+	pos := Position{
+		U: 95.0, Class: "equity",
+		Legs: []Leg{
+			{Side: Long, Kind: OptionKind, OptionType: "call",
+				K: 90, P: 2.0, P0: 2.0, Qty: 1, Mult: 100,
+				TimeToExpirationMonths: 0},
+		},
+	}
+	_, err := rb.Evaluate(pos, MarginAccount, Initial)
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	var re *RequiresError
+	if !errors.As(err, &re) {
+		t.Fatalf("expected *RequiresError, got %T: %v", err, err)
+	}
+	if !strings.HasPrefix(re.Error(), "invalid position:") {
+		t.Fatalf("RequiresError message %q lacks 'invalid position:' prefix", re.Error())
+	}
+}
+
+// TestFactoredEvaluateOnePreservesSemantics asserts the three external
+// outcomes of evaluateOne — match success, no-match, requires-failure —
+// remain identical after the tryMatchAndConstraints / checkRequires /
+// evalFormulas split.
+func TestFactoredEvaluateOnePreservesSemantics(t *testing.T) {
+	rb := loadRB(t)
+
+	// (1) match success: short OTM put (Cboe manual page 28 example) returns
+	// a finite Requirement and Permitted=true. Numeric value comes from the
+	// formula; the assertion below is a smoke check, not an oracle.
+	matchPos := Position{
+		U: 47.50, Class: "equity",
+		Legs: []Leg{
+			{Side: Short, Kind: OptionKind, OptionType: "put",
+				K: 45, P: 1.40, P0: 1.40, Qty: 1, Mult: 100,
+				Style: "american", Underlying: "XYZ"},
+		},
+	}
+	res, err := rb.Evaluate(matchPos, MarginAccount, Initial)
+	if err != nil {
+		t.Fatalf("match-success: unexpected error: %v", err)
+	}
+	if !res.Permitted || res.Requirement <= 0 {
+		t.Fatalf("match-success: got %+v, want Permitted=true and Requirement>0", res)
+	}
+
+	// (2) no-match: an empty leg list binds no rule. Evaluate surfaces this
+	// as a generic "no rule matched" error — NOT a *RequiresError.
+	noMatchPos := Position{U: 100.0, Class: "equity", Legs: []Leg{}}
+	_, err = rb.Evaluate(noMatchPos, MarginAccount, Initial)
+	if err == nil {
+		t.Fatalf("no-match: expected error, got nil")
+	}
+	var re *RequiresError
+	if errors.As(err, &re) {
+		t.Fatalf("no-match: must not be *RequiresError, got %q", err.Error())
+	}
+
+	// (3) requires-failure: zero time_to_expiration fails positive_fields on
+	// long_option_short_dated and surfaces as *RequiresError.
+	reqFailPos := Position{
+		U: 95.0, Class: "equity",
+		Legs: []Leg{
+			{Side: Long, Kind: OptionKind, OptionType: "call",
+				K: 90, P: 2.0, P0: 2.0, Qty: 1, Mult: 100,
+				TimeToExpirationMonths: 0},
+		},
+	}
+	_, err = rb.Evaluate(reqFailPos, MarginAccount, Initial)
+	if err == nil {
+		t.Fatalf("requires-fail: expected error, got nil")
+	}
+	if !errors.As(err, &re) {
+		t.Fatalf("requires-fail: expected *RequiresError, got %T: %v", err, err)
+	}
+}
+
+// TestCheckRequires_EmptyRequiresIsNil verifies the empty-requires fast path:
+// checkRequires must return nil immediately when rule.Requires is the zero
+// value, so callers do not pay any per-primitive cost on rules without a
+// requires: block.
+func TestCheckRequires_EmptyRequiresIsNil(t *testing.T) {
+	rb := loadRB(t)
+	rule := Rule{ID: "synthetic-empty-requires"}
+	if err := rb.checkRequires(rule, map[string]Leg{}, nil); err != nil {
+		t.Fatalf("empty requires: expected nil, got %v", err)
 	}
 }

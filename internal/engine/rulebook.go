@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -11,6 +12,32 @@ import (
 	"github.com/google/cel-go/cel"
 	"gopkg.in/yaml.v3"
 )
+
+// RequiresError marks a `requires:` guard failure as distinct from a CEL/
+// lookup/configuration error. Callers (notably the optimizer scoring path)
+// use errors.As to demote a guard failure to "rule doesn't apply" while
+// still propagating real evaluation errors.
+type RequiresError struct{ Msg string }
+
+func (e *RequiresError) Error() string { return e.Msg }
+
+func requiresErrorf(format string, args ...any) *RequiresError {
+	return &RequiresError{Msg: fmt.Sprintf(format, args...)}
+}
+
+// wrapRequires lifts a plain error from a requires-helper into a
+// *RequiresError so callers can identify guard failures with errors.As.
+// It is a no-op if err already wraps a *RequiresError or is nil.
+func wrapRequires(err error) error {
+	if err == nil {
+		return nil
+	}
+	var re *RequiresError
+	if errors.As(err, &re) {
+		return err
+	}
+	return &RequiresError{Msg: err.Error()}
+}
 
 // --- YAML schema mirrors the rules file ---
 
@@ -871,12 +898,16 @@ func (rb *Rulebook) validateRequirements(ruleID string, spec RequireSpec, bound 
 		}
 		leg := bound[slot]
 		for _, field := range spec.RequiredFields[slot] {
+			// fieldIsPresent's error is a config/code-drift signal
+			// ("unknown leg field"), not a position-shape guard failure —
+			// propagate as plain error so callers don't demote a rulebook
+			// bug to "rule doesn't apply."
 			present, err := fieldIsPresent(leg, field)
 			if err != nil {
 				return err
 			}
 			if !present {
-				return fmt.Errorf("invalid position: rule %s requires legs.%s.%s", ruleID, slot, field)
+				return requiresErrorf("invalid position: rule %s requires legs.%s.%s", ruleID, slot, field)
 			}
 		}
 	}
@@ -892,7 +923,7 @@ func (rb *Rulebook) validateRequirements(ruleID string, spec RequireSpec, bound 
 				return err
 			}
 			if err := requirePositive(ruleID, slot, field, v); err != nil {
-				return err
+				return wrapRequires(err)
 			}
 		}
 	}
@@ -904,7 +935,7 @@ func (rb *Rulebook) validateRequirements(ruleID string, spec RequireSpec, bound 
 			}
 		}
 		if err := requireExpirationSlots(ruleID, bound, spec.ExpirationSlots...); err != nil {
-			return err
+			return wrapRequires(err)
 		}
 	}
 
@@ -915,7 +946,7 @@ func (rb *Rulebook) validateRequirements(ruleID string, spec RequireSpec, bound 
 			}
 		}
 		if err := requireSameStringField(ruleID, bound, sa.Field, sa.Slots...); err != nil {
-			return err
+			return wrapRequires(err)
 		}
 	}
 
@@ -926,7 +957,7 @@ func (rb *Rulebook) validateRequirements(ruleID string, spec RequireSpec, bound 
 			}
 		}
 		if err := requireSameContractSize(ruleID, bound, group...); err != nil {
-			return err
+			return wrapRequires(err)
 		}
 	}
 
@@ -951,7 +982,7 @@ func (rb *Rulebook) validateRequirements(ruleID string, spec RequireSpec, bound 
 			return fmt.Errorf("invalid position: rule %s min_fields legs.%s.%s gte %q: %w", ruleID, mf.Slot, mf.Field, mf.GTE, nerr)
 		}
 		if !isFinite(got) || got < need {
-			return fmt.Errorf("invalid position: rule %s requires legs.%s.%s >= %s (got %g, need %g)", ruleID, mf.Slot, mf.Field, mf.GTE, got, need)
+			return requiresErrorf("invalid position: rule %s requires legs.%s.%s >= %s (got %g, need %g)", ruleID, mf.Slot, mf.Field, mf.GTE, got, need)
 		}
 	}
 
@@ -965,7 +996,7 @@ func (rb *Rulebook) validateRequirements(ruleID string, spec RequireSpec, bound 
 					return err
 				}
 				if !present {
-					return fmt.Errorf("invalid position: rule %s requires legs.%s.%s", ruleID, slot, field)
+					return requiresErrorf("invalid position: rule %s requires legs.%s.%s", ruleID, slot, field)
 				}
 			}
 		}
@@ -978,14 +1009,14 @@ func (rb *Rulebook) validateRequirements(ruleID string, spec RequireSpec, bound 
 					return err
 				}
 				if v == "" {
-					return fmt.Errorf("invalid position: rule %s requires legs.%s.%s", ruleID, slot, field)
+					return requiresErrorf("invalid position: rule %s requires legs.%s.%s", ruleID, slot, field)
 				}
 				if want == "" {
 					want = v
 					continue
 				}
 				if v != want {
-					return fmt.Errorf("invalid position: rule %s requires one %s for mpl(legs), got %q and %q", ruleID, field, want, v)
+					return requiresErrorf("invalid position: rule %s requires one %s for mpl(legs), got %q and %q", ruleID, field, want, v)
 				}
 			}
 		}
@@ -1012,41 +1043,56 @@ func sortedSlotKeys(m map[string]Leg) []string {
 	return keys
 }
 
-// evaluateOne applies a single rule to an already-prepared Position.
-// Returns:
-//   - (res, true, nil)  the rule matched, constraints held, and a result was
-//     computed (numeric, permitted=false, or deposit-kind-only).
-//   - (_,  false, nil)  the rule does not apply: either bindSlots refused, or
-//     a constraint evaluated cleanly to false.
-//   - (_,  false, err)  CEL compile/eval failure or rulebook configuration
-//     error (no formula AND no deposit_kind for the requested key).
-func (rb *Rulebook) evaluateOne(pos Position, rule Rule, accountType AccountType, phase Phase) (Result, bool, error) {
-	bound, ok := rb.tryMatch(pos, rule)
-	if !ok {
-		return Result{}, false, nil
-	}
-	activation := map[string]any{
+// buildActivation assembles the CEL activation map shared by constraint,
+// requires, and formula evaluation. Centralized so the three factored
+// helpers stay in lockstep on which top-level names are exposed.
+func (rb *Rulebook) buildActivation(pos Position, bound map[string]Leg) map[string]any {
+	return map[string]any{
 		"U":         pos.U,
 		"class":     pos.Class,
 		"lev":       pos.Lev,
 		"legs":      bound,
 		"constants": rb.constants,
 	}
-	// Constraints. A clean `false` demotes to "doesn't match"; a CEL eval
-	// error is surfaced (likely a rule bug).
+}
+
+// tryMatchAndConstraints runs slot binding and the constraint CEL pass.
+// Returns:
+//   - (bound, true, nil)  binding succeeded and every constraint held.
+//   - (nil,   false, nil) bindSlots refused, or a constraint evaluated
+//     cleanly to false — the rule does not apply.
+//   - (nil,   false, err) a CEL evaluation error occurred (rule bug).
+func (rb *Rulebook) tryMatchAndConstraints(pos Position, rule Rule) (map[string]Leg, bool, error) {
+	bound, ok := rb.tryMatch(pos, rule)
+	if !ok {
+		return nil, false, nil
+	}
+	activation := rb.buildActivation(pos, bound)
 	for _, c := range rule.Match.Constraints {
 		prog := rb.lookupProg(rule.ID + "/c:" + c)
 		out, _, err := prog.Eval(activation)
 		if err != nil {
-			return Result{}, false, fmt.Errorf("eval constraint %s %q: %w", rule.ID, c, err)
+			return nil, false, fmt.Errorf("eval constraint %s %q: %w", rule.ID, c, err)
 		}
 		if b, ok := out.Value().(bool); !ok || !b {
-			return Result{}, false, nil
+			return nil, false, nil
 		}
 	}
-	if err := rb.validateRequirements(rule.ID, rule.Requires, bound, activation); err != nil {
-		return Result{}, false, err
-	}
+	return bound, true, nil
+}
+
+// checkRequires walks rule.Requires against the bound legs. Returns nil on
+// pass, a *RequiresError for any guard failure (callers may demote with
+// errors.As), and a generic error only for CEL/lookup failures inside a
+// requires primitive (currently the min_fields gte expression).
+func (rb *Rulebook) checkRequires(rule Rule, bound map[string]Leg, activation map[string]any) error {
+	return rb.validateRequirements(rule.ID, rule.Requires, bound, activation)
+}
+
+// evalFormulas runs the Requirement, AppliedProceeds, and CashCall formulas
+// for the (accountType, phase) cell. Errors propagate as plain errors.
+func (rb *Rulebook) evalFormulas(pos Position, rule Rule, bound map[string]Leg, accountType AccountType, phase Phase) (Result, error) {
+	activation := rb.buildActivation(pos, bound)
 
 	var block FormulaBlock
 	var keyPrefix string
@@ -1058,17 +1104,17 @@ func (rb *Rulebook) evaluateOne(pos Position, rule Rule, accountType AccountType
 		block = rule.Formulas.Margin
 		keyPrefix = "margin"
 	default:
-		return Result{}, false, fmt.Errorf("unknown account type %q", string(accountType))
+		return Result{}, fmt.Errorf("unknown account type %q", string(accountType))
 	}
 	switch phase {
 	case Initial, Maintenance:
 	default:
-		return Result{}, false, fmt.Errorf("unknown phase %q", string(phase))
+		return Result{}, fmt.Errorf("unknown phase %q", string(phase))
 	}
 	formulaKey := keyPrefix + "." + string(phase)
 
 	if block.Permitted != nil && !*block.Permitted {
-		return Result{RuleID: rule.ID, FormulaKey: formulaKey, AccountType: string(accountType), Phase: string(phase), Permitted: false}, true, nil
+		return Result{RuleID: rule.ID, FormulaKey: formulaKey, AccountType: string(accountType), Phase: string(phase), Permitted: false}, nil
 	}
 
 	var expr, proceedsExpr, proceedsKey string
@@ -1086,19 +1132,19 @@ func (rb *Rulebook) evaluateOne(pos Position, rule Rule, accountType AccountType
 	// compute the number AND attach the kind — both are meaningful.
 	if expr == "" {
 		if block.DepositKind != "" {
-			return Result{RuleID: rule.ID, FormulaKey: formulaKey, AccountType: string(accountType), Phase: string(phase), Permitted: true, DepositKind: block.DepositKind}, true, nil
+			return Result{RuleID: rule.ID, FormulaKey: formulaKey, AccountType: string(accountType), Phase: string(phase), Permitted: true, DepositKind: block.DepositKind}, nil
 		}
-		return Result{}, false, fmt.Errorf("rule %s has no %s formula", rule.ID, formulaKey)
+		return Result{}, fmt.Errorf("rule %s has no %s formula", rule.ID, formulaKey)
 	}
 
 	prog := rb.lookupProg(rule.ID + "/" + formulaKey)
 	out, _, err := prog.Eval(activation)
 	if err != nil {
-		return Result{}, false, fmt.Errorf("eval %s: %w", rule.ID, err)
+		return Result{}, fmt.Errorf("eval %s: %w", rule.ID, err)
 	}
 	req, err := celNumber(out)
 	if err != nil {
-		return Result{}, false, fmt.Errorf("eval %s %s: %w", rule.ID, formulaKey, err)
+		return Result{}, fmt.Errorf("eval %s %s: %w", rule.ID, formulaKey, err)
 	}
 
 	var proceeds float64
@@ -1106,11 +1152,11 @@ func (rb *Rulebook) evaluateOne(pos Position, rule Rule, accountType AccountType
 		pprog := rb.lookupProg(rule.ID + "/" + proceedsKey)
 		pout, _, err := pprog.Eval(activation)
 		if err != nil {
-			return Result{}, false, fmt.Errorf("eval %s %s: %w", rule.ID, proceedsKey, err)
+			return Result{}, fmt.Errorf("eval %s %s: %w", rule.ID, proceedsKey, err)
 		}
 		proceeds, err = celNumber(pout)
 		if err != nil {
-			return Result{}, false, fmt.Errorf("eval %s %s: %w", rule.ID, proceedsKey, err)
+			return Result{}, fmt.Errorf("eval %s %s: %w", rule.ID, proceedsKey, err)
 		}
 	}
 
@@ -1124,7 +1170,32 @@ func (rb *Rulebook) evaluateOne(pos Position, rule Rule, accountType AccountType
 		CashCall:        req - proceeds,
 		Permitted:       true,
 		DepositKind:     block.DepositKind,
-	}, true, nil
+	}, nil
+}
+
+// evaluateOne applies a single rule to an already-prepared Position. Thin
+// composer over tryMatchAndConstraints, checkRequires, and evalFormulas.
+// Returns:
+//   - (res, true, nil)  the rule matched, constraints held, and a result was
+//     computed (numeric, permitted=false, or deposit-kind-only).
+//   - (_,  false, nil)  the rule does not apply: either bindSlots refused, or
+//     a constraint evaluated cleanly to false.
+//   - (_,  false, err)  CEL compile/eval failure, requires-guard failure
+//     (typed *RequiresError), or rulebook configuration error.
+func (rb *Rulebook) evaluateOne(pos Position, rule Rule, accountType AccountType, phase Phase) (Result, bool, error) {
+	bound, ok, err := rb.tryMatchAndConstraints(pos, rule)
+	if err != nil || !ok {
+		return Result{}, ok, err
+	}
+	activation := rb.buildActivation(pos, bound)
+	if err := rb.checkRequires(rule, bound, activation); err != nil {
+		return Result{}, false, err
+	}
+	res, err := rb.evalFormulas(pos, rule, bound, accountType, phase)
+	if err != nil {
+		return Result{}, false, err
+	}
+	return res, true, nil
 }
 
 // RuleByID returns the rule with the given ID and whether it was found. The
@@ -1152,44 +1223,6 @@ func (rb *Rulebook) OptimizerTargets() []string {
 	out := make([]string, len(rb.optimizerTargets))
 	copy(out, rb.optimizerTargets)
 	return out
-}
-
-// buildActivation assembles the CEL activation map for a single rule
-// invocation. Centralized so EvaluateRule, Match, and (future) other entry
-// points stay aligned with evaluateOne on what's in scope.
-func (rb *Rulebook) buildActivation(pos Position, bound map[string]Leg) map[string]any {
-	return map[string]any{
-		"U":         pos.U,
-		"class":     pos.Class,
-		"lev":       pos.Lev,
-		"legs":      bound,
-		"constants": rb.constants,
-	}
-}
-
-// tryMatchAndConstraints binds slots for `rule` against `pos` and verifies
-// every match.constraints expression evaluates cleanly to true. A clean
-// `false` from any constraint, or a non-binding match shape, returns
-// (_, false, nil) — the rule doesn't apply. A CEL eval error propagates as
-// (_, false, err). On success the returned binding can be re-used by callers
-// that want to chain requires evaluation and/or formula eval.
-func (rb *Rulebook) tryMatchAndConstraints(pos Position, rule Rule) (map[string]Leg, bool, error) {
-	bound, ok := rb.tryMatch(pos, rule)
-	if !ok {
-		return nil, false, nil
-	}
-	activation := rb.buildActivation(pos, bound)
-	for _, c := range rule.Match.Constraints {
-		prog := rb.lookupProg(rule.ID + "/c:" + c)
-		out, _, err := prog.Eval(activation)
-		if err != nil {
-			return nil, false, fmt.Errorf("eval constraint %s %q: %w", rule.ID, c, err)
-		}
-		if b, ok := out.Value().(bool); !ok || !b {
-			return nil, false, nil
-		}
-	}
-	return bound, true, nil
 }
 
 // Match is a thin wrapper around tryMatchAndConstraints for callers that
@@ -1251,90 +1284,19 @@ func (rb *Rulebook) EvaluateRule(pos Position, ruleID string, accountType Accoun
 		return Result{}, false, nil
 	}
 	activation := rb.buildActivation(pos, bound)
-	if err := rb.validateRequirements(rule.ID, rule.Requires, bound, activation); err != nil {
-		// Demote requires failures to "rule does not apply" — see godoc.
-		return Result{}, false, nil
-	}
-	return rb.evalFormulas(rule, activation, accountType, phase)
-}
-
-// evalFormulas computes the Result for a rule whose match/constraints/requires
-// have already been verified. Split out of evaluateOne so EvaluateRule and the
-// dispatch path produce identical numbers on the happy path.
-func (rb *Rulebook) evalFormulas(rule Rule, activation map[string]any, accountType AccountType, phase Phase) (Result, bool, error) {
-	var block FormulaBlock
-	var keyPrefix string
-	switch accountType {
-	case CashAccount:
-		block = rule.Formulas.Cash
-		keyPrefix = "cash"
-	case MarginAccount:
-		block = rule.Formulas.Margin
-		keyPrefix = "margin"
-	default:
-		return Result{}, false, fmt.Errorf("unknown account type %q", string(accountType))
-	}
-	switch phase {
-	case Initial, Maintenance:
-	default:
-		return Result{}, false, fmt.Errorf("unknown phase %q", string(phase))
-	}
-	formulaKey := keyPrefix + "." + string(phase)
-
-	if block.Permitted != nil && !*block.Permitted {
-		return Result{RuleID: rule.ID, FormulaKey: formulaKey, AccountType: string(accountType), Phase: string(phase), Permitted: false}, true, nil
-	}
-
-	var expr, proceedsExpr, proceedsKey string
-	switch phase {
-	case Initial:
-		expr = block.Initial
-		proceedsExpr = block.InitialProceeds
-		proceedsKey = keyPrefix + ".initial_proceeds"
-	case Maintenance:
-		expr = block.Maintenance
-		proceedsExpr = block.MaintenanceProceeds
-		proceedsKey = keyPrefix + ".maintenance_proceeds"
-	}
-	if expr == "" {
-		if block.DepositKind != "" {
-			return Result{RuleID: rule.ID, FormulaKey: formulaKey, AccountType: string(accountType), Phase: string(phase), Permitted: true, DepositKind: block.DepositKind}, true, nil
+	if err := rb.checkRequires(rule, bound, activation); err != nil {
+		// Demote *RequiresError to "rule does not apply" — see godoc. Any
+		// other error (CEL eval failure inside a requires primitive, etc.)
+		// propagates as a hard error.
+		var rerr *RequiresError
+		if errors.As(err, &rerr) {
+			return Result{}, false, nil
 		}
-		return Result{}, false, fmt.Errorf("rule %s has no %s formula", rule.ID, formulaKey)
+		return Result{}, false, err
 	}
-
-	prog := rb.lookupProg(rule.ID + "/" + formulaKey)
-	out, _, err := prog.Eval(activation)
+	res, err := rb.evalFormulas(pos, rule, bound, accountType, phase)
 	if err != nil {
-		return Result{}, false, fmt.Errorf("eval %s: %w", rule.ID, err)
+		return Result{}, false, err
 	}
-	req, err := celNumber(out)
-	if err != nil {
-		return Result{}, false, fmt.Errorf("eval %s %s: %w", rule.ID, formulaKey, err)
-	}
-
-	var proceeds float64
-	if proceedsExpr != "" {
-		pprog := rb.lookupProg(rule.ID + "/" + proceedsKey)
-		pout, _, err := pprog.Eval(activation)
-		if err != nil {
-			return Result{}, false, fmt.Errorf("eval %s %s: %w", rule.ID, proceedsKey, err)
-		}
-		proceeds, err = celNumber(pout)
-		if err != nil {
-			return Result{}, false, fmt.Errorf("eval %s %s: %w", rule.ID, proceedsKey, err)
-		}
-	}
-
-	return Result{
-		RuleID:          rule.ID,
-		FormulaKey:      formulaKey,
-		AccountType:     string(accountType),
-		Phase:           string(phase),
-		Requirement:     req,
-		AppliedProceeds: proceeds,
-		CashCall:        req - proceeds,
-		Permitted:       true,
-		DepositKind:     block.DepositKind,
-	}, true, nil
+	return res, true, nil
 }
