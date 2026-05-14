@@ -1207,6 +1207,56 @@ func TestRuleByID(t *testing.T) {
 	}
 }
 
+// TestRuleByID_DeepCopy mutates every nested slice/map/pointer reachable from
+// the returned Rule and confirms a second RuleByID call returns pristine
+// state. Guards the concurrent-read invariant on rb.rules.
+func TestRuleByID_DeepCopy(t *testing.T) {
+	rb := loadRB(t)
+	first, ok := rb.RuleByID("vertical_spread")
+	if !ok {
+		t.Fatalf("RuleByID(vertical_spread): expected found")
+	}
+	// Mutate match.legs, match.constraints, requires maps/slices, and the
+	// formula block's Permitted pointer (forge one if absent).
+	if len(first.Match.Legs) > 0 {
+		first.Match.Legs[0].Name = "MUTATED"
+	}
+	if len(first.Match.Constraints) > 0 {
+		first.Match.Constraints[0] = "MUTATED"
+	}
+	for k := range first.Requires.RequiredFields {
+		first.Requires.RequiredFields[k] = []string{"MUTATED"}
+		break
+	}
+	first.Requires.ExpirationSlots = append(first.Requires.ExpirationSlots, "MUTATED")
+	tt := true
+	first.Formulas.Margin.Permitted = &tt
+
+	second, ok := rb.RuleByID("vertical_spread")
+	if !ok {
+		t.Fatalf("RuleByID(vertical_spread) second call: expected found")
+	}
+	if len(second.Match.Legs) > 0 && second.Match.Legs[0].Name == "MUTATED" {
+		t.Errorf("match.legs[0].Name leaked through: %q", second.Match.Legs[0].Name)
+	}
+	if len(second.Match.Constraints) > 0 && second.Match.Constraints[0] == "MUTATED" {
+		t.Errorf("match.constraints[0] leaked: %q", second.Match.Constraints[0])
+	}
+	for k, v := range second.Requires.RequiredFields {
+		if len(v) == 1 && v[0] == "MUTATED" {
+			t.Errorf("requires.required_fields[%q] leaked: %v", k, v)
+		}
+	}
+	for _, s := range second.Requires.ExpirationSlots {
+		if s == "MUTATED" {
+			t.Errorf("requires.expiration_slots leaked: %v", second.Requires.ExpirationSlots)
+		}
+	}
+	if second.Formulas.Margin.Permitted != nil {
+		t.Errorf("formulas.margin.Permitted leaked: got non-nil pointer")
+	}
+}
+
 func TestOptimizerTargets_Sorted(t *testing.T) {
 	rb := loadRB(t)
 	got := rb.OptimizerTargets()

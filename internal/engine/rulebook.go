@@ -1199,15 +1199,104 @@ func (rb *Rulebook) evaluateOne(pos Position, rule Rule, accountType AccountType
 }
 
 // RuleByID returns the rule with the given ID and whether it was found. The
-// returned Rule is a value-copy of the loaded entry; callers must not rely on
-// mutating it to influence subsequent Evaluate calls.
+// returned Rule is a deep copy of the loaded entry — every nested slice, map,
+// and pointer is freshly allocated so a caller mutating the result cannot
+// race with concurrent Match/Evaluate readers of rb.rules.
 func (rb *Rulebook) RuleByID(id string) (Rule, bool) {
 	for _, r := range rb.rules {
 		if r.ID == id {
-			return r, true
+			return cloneRule(r), true
 		}
 	}
 	return Rule{}, false
+}
+
+// cloneRule deep-copies a Rule so the returned value shares no mutable state
+// with the original. Every nested slice/map/pointer carried by Rule,
+// MatchSpec, RequireSpec, and RuleFormulas is reallocated. Leaf scalars
+// (strings, ints) are copied by value via the struct copy.
+func cloneRule(r Rule) Rule {
+	out := r
+	out.Match = cloneMatchSpec(r.Match)
+	out.Requires = cloneRequireSpec(r.Requires)
+	out.Formulas = cloneRuleFormulas(r.Formulas)
+	if r.OptimizerTarget != nil {
+		v := *r.OptimizerTarget
+		out.OptimizerTarget = &v
+	}
+	return out
+}
+
+func cloneMatchSpec(m MatchSpec) MatchSpec {
+	out := m
+	if m.Legs != nil {
+		out.Legs = append([]LegSlot(nil), m.Legs...)
+	}
+	if m.Constraints != nil {
+		out.Constraints = append([]string(nil), m.Constraints...)
+	}
+	return out
+}
+
+func cloneRequireSpec(s RequireSpec) RequireSpec {
+	out := s
+	if s.RequiredFields != nil {
+		out.RequiredFields = make(map[string][]string, len(s.RequiredFields))
+		for k, v := range s.RequiredFields {
+			out.RequiredFields[k] = append([]string(nil), v...)
+		}
+	}
+	if s.PositiveFields != nil {
+		out.PositiveFields = make(map[string][]string, len(s.PositiveFields))
+		for k, v := range s.PositiveFields {
+			out.PositiveFields[k] = append([]string(nil), v...)
+		}
+	}
+	if s.ExpirationSlots != nil {
+		out.ExpirationSlots = append([]string(nil), s.ExpirationSlots...)
+	}
+	if s.SameAcrossSlots != nil {
+		out.SameAcrossSlots = make([]SameAcrossSlotsSpec, len(s.SameAcrossSlots))
+		for i, sa := range s.SameAcrossSlots {
+			out.SameAcrossSlots[i] = SameAcrossSlotsSpec{
+				Field: sa.Field,
+				Slots: append([]string(nil), sa.Slots...),
+			}
+		}
+	}
+	if s.SameContractSize != nil {
+		out.SameContractSize = make([][]string, len(s.SameContractSize))
+		for i, g := range s.SameContractSize {
+			out.SameContractSize[i] = append([]string(nil), g...)
+		}
+	}
+	if s.MinFields != nil {
+		out.MinFields = append([]MinFieldSpec(nil), s.MinFields...)
+	}
+	if s.AllSlots != nil {
+		v := *s.AllSlots
+		if s.AllSlots.RequiredFields != nil {
+			v.RequiredFields = append([]string(nil), s.AllSlots.RequiredFields...)
+		}
+		out.AllSlots = &v
+	}
+	return out
+}
+
+func cloneRuleFormulas(f RuleFormulas) RuleFormulas {
+	return RuleFormulas{
+		Cash:   cloneFormulaBlock(f.Cash),
+		Margin: cloneFormulaBlock(f.Margin),
+	}
+}
+
+func cloneFormulaBlock(b FormulaBlock) FormulaBlock {
+	out := b
+	if b.Permitted != nil {
+		v := *b.Permitted
+		out.Permitted = &v
+	}
+	return out
 }
 
 // OptimizerTargets returns the sorted list of rule IDs that the spread
