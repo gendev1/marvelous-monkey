@@ -253,6 +253,96 @@ func TestRuleByID(t *testing.T) {
 	}
 }
 
+// TestRuleByID_ReturnsIndependentCopy asserts the Rule returned from
+// RuleByID is a deep copy: mutating its slices, maps, or *bool fields must
+// not leak back into the Rulebook's stored rules. Regression guard for the
+// concurrency invariant — if a caller could mutate rb.rules in place, the
+// "Rulebook is concurrent-safe only because LoadRulebook pre-compiles" claim
+// in CLAUDE.md would be violated.
+func TestRuleByID_ReturnsIndependentCopy(t *testing.T) {
+	rb := loadRB(t)
+	// vertical_spread has populated Match.Legs, Match.Constraints, Requires
+	// (RequiredFields map, SameAcrossSlots slice, ExpirationSlots slice), and
+	// our two YAML overrides put OptimizerTarget on the convertible/warrant
+	// rules. Round-trip each.
+	id := "vertical_spread"
+	first, ok := rb.RuleByID(id)
+	if !ok {
+		t.Fatalf("RuleByID(%q): not found", id)
+	}
+
+	// Mutate every reference field on the returned copy.
+	first.Match.Legs[0].Name = "MUTATED"
+	first.Match.Constraints[0] = "MUTATED"
+	first.Requires.RequiredFields["long_leg"][0] = "MUTATED"
+	first.Requires.SameAcrossSlots[0].Slots[0] = "MUTATED"
+	first.Requires.ExpirationSlots[0] = "MUTATED"
+	// Note: OptimizerTarget pointer-vs-value sharing is exercised below on
+	// short_call_long_convertible, where the rule actually has a non-nil
+	// pointer to dereference and mutate.
+
+	// Fetch again — must be pristine.
+	second, ok := rb.RuleByID(id)
+	if !ok {
+		t.Fatalf("RuleByID(%q) second fetch: not found", id)
+	}
+	if second.Match.Legs[0].Name == "MUTATED" {
+		t.Errorf("RuleByID leaked Match.Legs reference: second fetch sees mutation")
+	}
+	if second.Match.Constraints[0] == "MUTATED" {
+		t.Errorf("RuleByID leaked Match.Constraints reference")
+	}
+	if second.Requires.RequiredFields["long_leg"][0] == "MUTATED" {
+		t.Errorf("RuleByID leaked Requires.RequiredFields slice reference")
+	}
+	if len(second.Requires.SameAcrossSlots) > 0 && len(second.Requires.SameAcrossSlots[0].Slots) > 0 &&
+		second.Requires.SameAcrossSlots[0].Slots[0] == "MUTATED" {
+		t.Errorf("RuleByID leaked Requires.SameAcrossSlots[].Slots reference")
+	}
+	if second.Requires.ExpirationSlots[0] == "MUTATED" {
+		t.Errorf("RuleByID leaked Requires.ExpirationSlots reference")
+	}
+	// Spot-check the OptimizerTarget *bool on a rule that DOES have one,
+	// and confirm mutating the returned bool doesn't change the source.
+	conv, ok := rb.RuleByID("short_call_long_convertible")
+	if !ok {
+		t.Fatalf("RuleByID(short_call_long_convertible): not found")
+	}
+	if conv.OptimizerTarget == nil {
+		t.Fatalf("expected non-nil OptimizerTarget on short_call_long_convertible")
+	}
+	*conv.OptimizerTarget = true
+	conv2, _ := rb.RuleByID("short_call_long_convertible")
+	if conv2.OptimizerTarget == nil || *conv2.OptimizerTarget {
+		t.Errorf("RuleByID leaked OptimizerTarget *bool: mutation visible in second fetch")
+	}
+}
+
+// TestMatch_LegsPatternRejected: rules with legs_pattern have synthetic slot
+// names, so Match's "bind these slots" question is meaningless. Confirms the
+// guard fails fast instead of returning a binding the caller didn't expect.
+func TestMatch_LegsPatternRejected(t *testing.T) {
+	rb := loadRB(t)
+	pos := Position{
+		U:     100,
+		Class: "equity",
+		Legs: []Leg{
+			{Side: Long, Kind: OptionKind, OptionType: "call", K: 100, P: 1, P0: 1, Qty: 1, Mult: 100},
+			{Side: Short, Kind: OptionKind, OptionType: "call", K: 110, P: 1, P0: 1, Qty: 1, Mult: 100},
+		},
+	}
+	_, ok, err := rb.Match(pos, "generic_limited_risk_combo")
+	if err == nil {
+		t.Fatal("Match: expected error for legs_pattern rule, got nil")
+	}
+	if ok {
+		t.Error("Match: expected ok=false for legs_pattern rule")
+	}
+	if !strings.Contains(err.Error(), "legs_pattern") {
+		t.Errorf("expected 'legs_pattern' in error, got %v", err)
+	}
+}
+
 // TestOptimizerTargets_DefaultsAndOverrides asserts the resolved set matches
 // the rule-by-rule table in docs/architecture/spread-optimizer.md. In
 // particular: every 2/3/4-slot rule is on by default, naked 1-slot rules are

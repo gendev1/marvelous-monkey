@@ -1166,15 +1166,108 @@ func (rb *Rulebook) evaluateOne(pos Position, rule Rule, accountType AccountType
 	return res, true, nil
 }
 
-// RuleByID returns the loaded Rule with the given id. Read-only — the returned
-// Rule is a copy of the rulebook entry.
+// RuleByID returns a deep copy of the loaded Rule with the given id. The
+// returned Rule shares no slice/map/pointer state with rb.rules, so callers
+// are free to mutate it without violating the Rulebook concurrency invariant
+// (LoadRulebook pre-compiles every formula and constraint; rb.rules must
+// remain immutable after that point).
 func (rb *Rulebook) RuleByID(id string) (Rule, bool) {
 	for _, r := range rb.rules {
 		if r.ID == id {
-			return r, true
+			return cloneRule(r), true
 		}
 	}
 	return Rule{}, false
+}
+
+// cloneRule deep-copies every reference-typed field of Rule so the returned
+// value is safe to mutate. The CEL programs in rb.progs are intentionally NOT
+// cloned — they're shared, read-only state populated by LoadRulebook — but the
+// Rule struct doesn't hold pointers into rb.progs anyway; the map lives on
+// Rulebook.
+func cloneRule(r Rule) Rule {
+	out := r // shallow copy first; mutate reference fields below
+	out.Match = cloneMatchSpec(r.Match)
+	out.Requires = cloneRequireSpec(r.Requires)
+	out.Formulas = cloneRuleFormulas(r.Formulas)
+	if r.OptimizerTarget != nil {
+		v := *r.OptimizerTarget
+		out.OptimizerTarget = &v
+	}
+	return out
+}
+
+func cloneMatchSpec(m MatchSpec) MatchSpec {
+	out := m
+	if m.Legs != nil {
+		out.Legs = append([]LegSlot(nil), m.Legs...)
+	}
+	if m.Constraints != nil {
+		out.Constraints = append([]string(nil), m.Constraints...)
+	}
+	return out
+}
+
+func cloneRequireSpec(s RequireSpec) RequireSpec {
+	out := s
+	if s.RequiredFields != nil {
+		out.RequiredFields = make(map[string][]string, len(s.RequiredFields))
+		for k, v := range s.RequiredFields {
+			out.RequiredFields[k] = append([]string(nil), v...)
+		}
+	}
+	if s.PositiveFields != nil {
+		out.PositiveFields = make(map[string][]string, len(s.PositiveFields))
+		for k, v := range s.PositiveFields {
+			out.PositiveFields[k] = append([]string(nil), v...)
+		}
+	}
+	if s.ExpirationSlots != nil {
+		out.ExpirationSlots = append([]string(nil), s.ExpirationSlots...)
+	}
+	if s.SameAcrossSlots != nil {
+		out.SameAcrossSlots = make([]SameAcrossSlotsSpec, len(s.SameAcrossSlots))
+		for i, sa := range s.SameAcrossSlots {
+			cp := sa
+			if sa.Slots != nil {
+				cp.Slots = append([]string(nil), sa.Slots...)
+			}
+			out.SameAcrossSlots[i] = cp
+		}
+	}
+	if s.SameContractSize != nil {
+		out.SameContractSize = make([][]string, len(s.SameContractSize))
+		for i, group := range s.SameContractSize {
+			out.SameContractSize[i] = append([]string(nil), group...)
+		}
+	}
+	if s.MinFields != nil {
+		out.MinFields = append([]MinFieldSpec(nil), s.MinFields...)
+	}
+	if s.AllSlots != nil {
+		cp := *s.AllSlots
+		if s.AllSlots.RequiredFields != nil {
+			cp.RequiredFields = append([]string(nil), s.AllSlots.RequiredFields...)
+		}
+		out.AllSlots = &cp
+	}
+	return out
+}
+
+func cloneRuleFormulas(f RuleFormulas) RuleFormulas {
+	return RuleFormulas{
+		Cash:   cloneFormulaBlock(f.Cash),
+		Margin: cloneFormulaBlock(f.Margin),
+	}
+}
+
+func cloneFormulaBlock(b FormulaBlock) FormulaBlock {
+	out := b
+	if b.Permitted != nil {
+		v := *b.Permitted
+		out.Permitted = &v
+	}
+	return out
 }
 
 // ruleIsDefaultOptimizerTarget is the v1 policy for which rules the optimizer
@@ -1227,6 +1320,14 @@ func (rb *Rulebook) Match(pos Position, ruleID string) (map[string]Leg, bool, er
 	rule, ok := rb.RuleByID(ruleID)
 	if !ok {
 		return nil, false, fmt.Errorf("unknown rule %q", ruleID)
+	}
+	if rule.Match.LegsPattern != "" {
+		// Guard the precondition the godoc spells out: legs_pattern rules
+		// (only generic_limited_risk_combo today) have synthetic slot names
+		// derived from leg index, so an exact-rule "bind these slots" question
+		// is meaningless. Fail fast so callers can't silently get a binding
+		// they didn't expect.
+		return nil, false, fmt.Errorf("rulebook.Match: rule %q uses legs_pattern; use Evaluate instead", ruleID)
 	}
 	pos = rb.preparePosition(pos)
 	if err := validatePosition(pos); err != nil {
