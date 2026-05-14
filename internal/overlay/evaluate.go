@@ -14,14 +14,19 @@ import (
 // positionEntry is the per-position eligibility record computed once
 // per Evaluate call and reused by both the position-scope and
 // group-scope loops. errored or non-stock-like positions never appear
-// here; their exclusion is documented on the type.
+// here; their exclusion is documented on the type. secMissing records
+// whether the lookup fell back to the synthetic SecurityFacts; the
+// on_missing_reference policy is decided at rule-application time so
+// that per-rule policies (D3) can be honored without poisoning the
+// shared entry record.
 type positionEntry struct {
-	pos    account.AccountPosition
-	facts  positionFacts
-	sec    SecurityFacts
-	secOK  bool
-	side   string
-	baseRq float64
+	pos        account.AccountPosition
+	facts      positionFacts
+	sec        SecurityFacts
+	secOK      bool
+	secMissing bool
+	side       string
+	baseRq     float64
 }
 
 // Evaluate runs the overlay Rulebook against an account snapshot and
@@ -29,15 +34,18 @@ type positionEntry struct {
 // not mutate acct or snap.
 //
 // Position- and group-scope rules are implemented with modes
-// add / max / floor / block. Account- and symbol-scope rules are
+// add / max / floor / block. Block mode (D1) emits both a
+// HouseComponent (Delta=0, Applied=true) and a HouseViolation, but does
+// not move the requirement total. Account- and symbol-scope rules are
 // skipped silently — their issues land later. Option positions are
 // also skipped (the overlay does not yet model option facts).
 //
-// Audit emission is wired here: out.Audit.Entries gets one AuditEntry
-// per (rule × eligible-target) pair, including non-matches. Iteration
-// order is outer-rule (the rulebook's deterministic order) then inner-
-// target (snapshot order for positions, byte-sorted key for groups),
-// so two Evaluate calls on identical inputs return DeepEqual results.
+// Audit emission (#46) is wired here: out.Audit.Entries gets one
+// AuditEntry per (rule × eligible-target) pair, including non-matches.
+// Iteration order is outer-rule (the rulebook's deterministic order)
+// then inner-target (snapshot order for positions, byte-sorted key for
+// groups), so two Evaluate calls on identical inputs return DeepEqual
+// results.
 //
 // BaselineRulebookHash is intentionally left empty: surfacing a stable
 // digest requires either a new method on engine.Rulebook or threading
@@ -88,27 +96,41 @@ func (e *Engine) Evaluate(
 			continue
 		}
 		sec, secOK := lookupSecurity(ref, facts.primarySymbol, facts.primaryVenue)
-		if !secOK {
-			out.Warnings = append(out.Warnings,
-				fmt.Sprintf("reference data missing for %s@%s; defaulted instrument_kind=stock",
-					facts.primarySymbol, facts.primaryVenue))
-		}
 		entries = append(entries, positionEntry{
-			pos:    p,
-			facts:  facts,
-			sec:    sec,
-			secOK:  secOK,
-			side:   sideToken(facts),
-			baseRq: eval.Result.Requirement,
+			pos:        p,
+			facts:      facts,
+			sec:        sec,
+			secOK:      secOK,
+			secMissing: !secOK,
+			side:       sideToken(facts),
+			baseRq:     eval.Result.Requirement,
 		})
 	}
+
+	// emittedRefViolation tracks which positions had at least one
+	// `on_missing_reference: error` rule fire, so the lazy missing-ref
+	// warning (emitted after all rules are processed) can be suppressed
+	// per D3. emittedRefWarning is the deduplication gate for that
+	// warning across rule iterations.
+	emittedRefViolation := make(map[string]bool, len(entries))
 
 	for _, rule := range rb.rules {
 		switch rule.Scope {
 		case "position":
-			evaluatePositionRule(rule, entries, acct, acctAct, rb.constants, &out)
+			evaluatePositionRule(rule, entries, acct, acctAct, rb.constants, &out, emittedRefViolation)
 		case "group":
 			evaluateGroupRule(rule, entries, acct, acctAct, rb.constants, &out)
+		}
+	}
+
+	// Per D3: emit the missing-ref warning lazily so an error-policy
+	// violation on the same position can replace it. Warnings fire at
+	// most once per position, in entry (snapshot) order.
+	for _, entry := range entries {
+		if entry.secMissing && !emittedRefViolation[entry.pos.ID] {
+			out.Warnings = append(out.Warnings,
+				fmt.Sprintf("reference data missing for %s@%s; defaulted instrument_kind=stock",
+					entry.facts.primarySymbol, entry.facts.primaryVenue))
 		}
 	}
 
@@ -116,9 +138,12 @@ func (e *Engine) Evaluate(
 	return out, nil
 }
 
-// evaluatePositionRule emits one AuditEntry per eligible position
-// (regardless of applies-matrix), optionally producing a
-// HouseComponent for matched + applied (rule, position) pairs.
+// evaluatePositionRule iterates one rule across every eligible
+// position. One AuditEntry is appended per (rule, position), even when
+// the rule is excluded by applies, skipped by an error-policy
+// missing-ref violation, or evaluates `when` to false. HouseComponents
+// and HouseViolations are emitted only on the match paths documented
+// in Evaluate.
 func evaluatePositionRule(
 	rule overlayRule,
 	entries []positionEntry,
@@ -126,6 +151,7 @@ func evaluatePositionRule(
 	acctAct map[string]any,
 	consts map[string]any,
 	out *HouseRequirement,
+	emittedRefViolation map[string]bool,
 ) {
 	for _, entry := range entries {
 		ae := newAuditEntry(rule)
@@ -133,6 +159,26 @@ func evaluatePositionRule(
 		ae.Symbol = entry.facts.symbol
 
 		if !appliesMatches(rule.Applies, acct, entry.sec, entry.side) {
+			out.Audit.Entries = append(out.Audit.Entries, ae)
+			continue
+		}
+
+		// D3: missing-ref + error policy → emit a violation for this
+		// (rule, position) and skip evaluating it. Audit row still
+		// records the consideration with Matched=false (when never
+		// ran).
+		if entry.secMissing && rule.OnMissingReference == "error" {
+			out.Violations = append(out.Violations, HouseViolation{
+				RuleID:     rule.ID,
+				Scope:      rule.Scope,
+				PositionID: entry.pos.ID,
+				Symbol:     entry.facts.symbol,
+				Message: fmt.Sprintf(
+					"reference data missing for %s@%s; rule %q requires reference data",
+					entry.facts.primarySymbol, entry.facts.primaryVenue, rule.ID,
+				),
+			})
+			emittedRefViolation[entry.pos.ID] = true
 			out.Audit.Entries = append(out.Audit.Entries, ae)
 			continue
 		}
@@ -159,36 +205,28 @@ func evaluatePositionRule(
 		ae.Matched = true
 
 		if rule.Mode == "block" {
-			var amt float64
+			var amount float64
 			if rule.formulaProg != nil {
-				if v, err := evalNumber(rule.formulaProg, activation); err == nil {
-					amt = v
-				} else {
+				a, err := evalNumber(rule.formulaProg, activation)
+				if err != nil {
 					out.Warnings = append(out.Warnings,
 						fmt.Sprintf("rule %q formula skipped on position %s: %v", rule.ID, entry.pos.ID, err))
+					out.Audit.Entries = append(out.Audit.Entries, ae)
+					continue
 				}
+				amount = a
 			}
-			comp := HouseComponent{
-				RuleID:        rule.ID,
-				Scope:         rule.Scope,
-				Mode:          rule.Mode,
-				Basis:         rule.Basis,
-				PositionID:    entry.pos.ID,
-				Symbol:        entry.facts.symbol,
-				OverlayAmount: amt,
-				Formula:       rule.Formula,
-				Reason:        rule.Reason,
-				Applied:       true,
-				Evidence: map[string]float64{
-					"position.long_market_value":  entry.facts.longMV,
-					"position.short_market_value": entry.facts.shortMV,
-					"position.gross_market_value": entry.facts.grossMV,
-					"overlay.amount":              amt,
-				},
-			}
+			comp := composeBlockComponent(rule, entry.pos.ID, "", entry.facts, amount)
 			out.Components = append(out.Components, comp)
+			out.Violations = append(out.Violations, HouseViolation{
+				RuleID:     rule.ID,
+				Scope:      rule.Scope,
+				PositionID: entry.pos.ID,
+				Symbol:     entry.facts.symbol,
+				Message:    blockMessage(rule, "position"),
+			})
 			ae.Applied = true
-			ae.Amount = amt
+			ae.Amount = amount
 			ae.Delta = 0
 			out.Audit.Entries = append(out.Audit.Entries, ae)
 			continue
@@ -215,9 +253,9 @@ func evaluatePositionRule(
 }
 
 // evaluateGroupRule buckets eligible positions per the rule's
-// group_by, then emits one AuditEntry per non-empty bucket. Buckets
-// are visited in byte-sorted key order so audit and component output
-// are byte-identical across runs.
+// group_by, then emits one AuditEntry per non-empty bucket (sorted by
+// key). HouseComponents and HouseViolations follow the same
+// emission rules as the position scope.
 func evaluateGroupRule(
 	rule overlayRule,
 	entries []positionEntry,
@@ -297,38 +335,27 @@ func evaluateGroupRule(
 		ae.Matched = true
 
 		if rule.Mode == "block" {
-			var amt float64
+			var amount float64
 			if rule.formulaProg != nil {
-				if v, err := evalNumber(rule.formulaProg, activation); err == nil {
-					amt = v
-				} else {
+				a, err := evalNumber(rule.formulaProg, activation)
+				if err != nil {
 					out.Warnings = append(out.Warnings,
 						fmt.Sprintf("rule %q formula skipped on group %s: %v", rule.ID, k, err))
+					out.Audit.Entries = append(out.Audit.Entries, ae)
+					continue
 				}
+				amount = a
 			}
-			comp := HouseComponent{
-				RuleID:        rule.ID,
-				Scope:         rule.Scope,
-				Mode:          rule.Mode,
-				Basis:         rule.Basis,
-				Symbol:        g.key,
-				GroupKey:      g.key,
-				OverlayAmount: amt,
-				Formula:       rule.Formula,
-				Reason:        rule.Reason,
-				Applied:       true,
-				Evidence: map[string]float64{
-					"group.long_market_value":  g.longMV,
-					"group.short_market_value": g.shortMV,
-					"group.gross_market_value": g.grossMV,
-					"group.net_market_value":   g.netMV,
-					"group.position_count":     float64(g.positionCount),
-					"overlay.amount":           amt,
-				},
-			}
+			comp := composeGroupBlockComponent(rule, g, amount)
 			out.Components = append(out.Components, comp)
+			out.Violations = append(out.Violations, HouseViolation{
+				RuleID:   rule.ID,
+				Scope:    rule.Scope,
+				GroupKey: g.key,
+				Message:  blockMessage(rule, "group"),
+			})
 			ae.Applied = true
-			ae.Amount = amt
+			ae.Amount = amount
 			ae.Delta = 0
 			out.Audit.Entries = append(out.Audit.Entries, ae)
 			continue
@@ -397,6 +424,78 @@ func composeGroupComponent(rule overlayRule, g *groupFacts, amount float64) Hous
 		comp.Applied = delta > 0
 	}
 	return comp
+}
+
+// composeBlockComponent builds the HouseComponent for a position-scope
+// block-mode match. Block components carry Delta = 0 and Applied = true
+// so the audit log records the match without moving the requirement.
+// BaselineAmount is informational. OverlayAmount records the formula
+// value when the rule carried one (zero otherwise).
+func composeBlockComponent(rule overlayRule, positionID, groupKey string, facts positionFacts, amount float64) HouseComponent {
+	return HouseComponent{
+		RuleID:         rule.ID,
+		Scope:          rule.Scope,
+		Mode:           rule.Mode,
+		Basis:          rule.Basis,
+		PositionID:     positionID,
+		Symbol:         facts.symbol,
+		GroupKey:       groupKey,
+		BaselineAmount: facts.baselineReq,
+		OverlayAmount:  amount,
+		Delta:          0,
+		Applied:        true,
+		Formula:        rule.Formula,
+		Reason:         rule.Reason,
+		Evidence: map[string]float64{
+			"position.long_market_value":    facts.longMV,
+			"position.short_market_value":   facts.shortMV,
+			"position.gross_market_value":   facts.grossMV,
+			"position.net_market_value":     facts.netMV,
+			"position.long_shares":          facts.longShares,
+			"position.short_shares":         facts.shortShares,
+			"position.baseline_requirement": facts.baselineReq,
+			"overlay.amount":                amount,
+		},
+	}
+}
+
+// composeGroupBlockComponent builds the HouseComponent for a
+// group-scope block match. GroupKey is set; PositionID is left empty so
+// consumers can distinguish group attributions. Symbol is set to the
+// group key to match the convention used by composeGroupComponent.
+func composeGroupBlockComponent(rule overlayRule, g *groupFacts, amount float64) HouseComponent {
+	return HouseComponent{
+		RuleID:         rule.ID,
+		Scope:          rule.Scope,
+		Mode:           rule.Mode,
+		Basis:          rule.Basis,
+		Symbol:         g.key,
+		GroupKey:       g.key,
+		BaselineAmount: g.baselineSum,
+		OverlayAmount:  amount,
+		Delta:          0,
+		Applied:        true,
+		Formula:        rule.Formula,
+		Reason:         rule.Reason,
+		Evidence: map[string]float64{
+			"group.long_market_value":  g.longMV,
+			"group.short_market_value": g.shortMV,
+			"group.gross_market_value": g.grossMV,
+			"group.net_market_value":   g.netMV,
+			"group.position_count":     float64(g.positionCount),
+			"group.baseline_sum":       g.baselineSum,
+			"overlay.amount":           amount,
+		},
+	}
+}
+
+// blockMessage returns the user-facing violation message for a
+// block-mode match: rule.Reason if set, otherwise a generated default.
+func blockMessage(rule overlayRule, scope string) string {
+	if rule.Reason != "" {
+		return rule.Reason
+	}
+	return fmt.Sprintf("%s blocked by rule %q", scope, rule.ID)
 }
 
 // appliesMatches enforces each list-typed applies filter. An empty list
