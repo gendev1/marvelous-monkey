@@ -390,6 +390,55 @@ func TestEmptyInput(t *testing.T) {
 	}
 }
 
+func TestStrongestResidualPriority_AlphabeticalTiebreak(t *testing.T) {
+	opt := newOpt(t)
+	// Two legs that both trigger *ErrNoNakedRule (same priority class) —
+	// LegIDs differ only in their first character so the alphabetical
+	// tie-break is what picks the winner. "a-unscoreable" must win.
+	mkLonelyLong := func(id LegID) WorkingLeg {
+		return WorkingLeg{ID: id, OpenQty: 1, Leg: engine.Leg{
+			Side: engine.Long, Kind: engine.OptionKind, OptionType: "call",
+			K: 100, P: 5.0, P0: 5.0, Mult: 100,
+			TimeToExpirationMonths: 12, // no Venue → no naked rule binds
+		}}
+	}
+	legs := []WorkingLeg{mkLonelyLong("b-unscoreable"), mkLonelyLong("a-unscoreable")}
+	_, err := opt.Optimize(equityFacts, legs)
+	var nErr *ErrNoNakedRule
+	if !errors.As(err, &nErr) {
+		t.Fatalf("err = %v, want *ErrNoNakedRule", err)
+	}
+	if nErr.LegID != "a-unscoreable" {
+		t.Errorf("tiebreak picked %q, want a-unscoreable (alphabetical-earlier)", nErr.LegID)
+	}
+}
+
+func TestNegativeOpenQty_Rejected(t *testing.T) {
+	opt := newOpt(t)
+	legs := []WorkingLeg{
+		{ID: "bad", OpenQty: -1, Leg: engine.Leg{
+			Side: engine.Long, Kind: engine.OptionKind, OptionType: "call",
+		}},
+	}
+	_, err := opt.Optimize(equityFacts, legs)
+	if err == nil {
+		t.Fatalf("expected validation error for negative OpenQty, got nil")
+	}
+}
+
+func TestNegativeOpenShares_Rejected(t *testing.T) {
+	opt := newOpt(t)
+	legs := []WorkingLeg{
+		{ID: "bad", OpenShares: -100, Leg: engine.Leg{
+			Side: engine.Long, Kind: engine.StockKind,
+		}},
+	}
+	_, err := opt.Optimize(equityFacts, legs)
+	if err == nil {
+		t.Fatalf("expected validation error for negative OpenShares, got nil")
+	}
+}
+
 func TestWorkingLegBothPositive_Rejected(t *testing.T) {
 	opt := newOpt(t)
 	legs := []WorkingLeg{

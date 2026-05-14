@@ -57,10 +57,12 @@ func New(rb *engine.Rulebook, at engine.AccountType, ph engine.Phase) *Optimizer
 	return &Optimizer{rb: rb, accountType: at, phase: ph}
 }
 
-// Decomposition is the result of one Optimize call. When the returned error is
-// non-nil, SubPositions / AttributionsByLeg / TotalRequirement still describe
-// whatever was scored before the failing leg was reached (see
-// §"Partial-output contract").
+// Decomposition is the result of one Optimize call. When the returned error
+// is non-nil, SubPositions / AttributionsByLeg / TotalRequirement still
+// describe every leg that did score successfully — scoring is not aborted at
+// the first failing leg; all input legs are visited, errors are collected,
+// and the strongest one (per compareResidualErr) is returned alongside this
+// partial Decomposition (see §"Partial-output contract").
 type Decomposition struct {
 	SubPositions      []SubPosition
 	AttributionsByLeg map[LegID][]Attribution
@@ -167,13 +169,17 @@ func compareResidualErr(a, b error) int {
 	if pa == 0 {
 		return 0
 	}
+	// Tie-break: alphabetical-earlier LegID wins per
+	// §"Strongest-residual-error priority". `pickStronger` uses argmax (a
+	// wins on >= 0), so we must invert strings.Compare so the lex-smaller
+	// LegID produces the positive value.
 	if cmp := strings.Compare(string(residualErrLegID(a)), string(residualErrLegID(b))); cmp != 0 {
-		return cmp
+		return -cmp
 	}
 	// Both have the same priority and same LegID (or both empty for hard
-	// engine errors). Fall back to Error() text for total ordering so the
-	// comparator is deterministic.
-	return strings.Compare(a.Error(), b.Error())
+	// engine errors). Fall back to Error() text for total ordering — again
+	// inverted so the alphabetically-earlier message wins under argmax.
+	return -strings.Compare(a.Error(), b.Error())
 }
 
 // Optimize decomposes the input bucket into recognized strategies.
@@ -187,8 +193,10 @@ func compareResidualErr(a, b error) int {
 //   - WorkingLeg with both OpenQty > eps and OpenShares > eps is malformed
 //     input — returns a validation error and the empty Decomposition.
 //   - On success, returns a complete Decomposition with all legs attributed.
-//   - On error, returns the partial Decomposition built before the failing
-//     leg, plus the strongest residual error per compareResidualErr.
+//   - On error, returns a partial Decomposition holding every leg that did
+//     score successfully (scoring is not aborted at the first failing leg —
+//     all legs are visited, errors are collected, and the strongest one per
+//     compareResidualErr is returned).
 func (o *Optimizer) Optimize(facts BucketFacts, legs []WorkingLeg) (Decomposition, error) {
 	state, err := buildState(legs)
 	if err != nil {

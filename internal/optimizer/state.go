@@ -30,6 +30,16 @@ type State struct {
 func buildState(legs []WorkingLeg) (State, error) {
 	out := make([]WorkingLeg, 0, len(legs))
 	for _, wl := range legs {
+		// Negative open inventory is malformed input, not a "not-live" leg
+		// — silently dropping it would mask broken upstream accounting and
+		// understate decomposition totals. The > epsQty live-checks below
+		// would otherwise let negatives fall through into the skip branch.
+		if wl.OpenQty < -epsQty || wl.OpenShares < -epsQty {
+			return State{}, fmt.Errorf(
+				"invalid WorkingLeg %q: OpenQty/OpenShares must be >= 0 (got qty=%g shares=%g)",
+				string(wl.ID), wl.OpenQty, wl.OpenShares,
+			)
+		}
 		qtyLive := wl.OpenQty > epsQty
 		sharesLive := wl.OpenShares > epsQty
 		if qtyLive && sharesLive {
