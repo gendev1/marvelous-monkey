@@ -29,10 +29,20 @@ type positionEntry struct {
 // not mutate acct or snap.
 //
 // Position- and group-scope rules are implemented with modes
-// add / max / floor. Account- and symbol-scope rules and the block
-// mode are skipped silently — their issues land later. Option
-// positions are also skipped (the overlay does not yet model option
-// facts).
+// add / max / floor / block. Account- and symbol-scope rules are
+// skipped silently — their issues land later. Option positions are
+// also skipped (the overlay does not yet model option facts).
+//
+// Audit emission is wired here: out.Audit.Entries gets one AuditEntry
+// per (rule × eligible-target) pair, including non-matches. Iteration
+// order is outer-rule (the rulebook's deterministic order) then inner-
+// target (snapshot order for positions, byte-sorted key for groups),
+// so two Evaluate calls on identical inputs return DeepEqual results.
+//
+// BaselineRulebookHash is intentionally left empty: surfacing a stable
+// digest requires either a new method on engine.Rulebook or threading
+// the hash through AccountSnapshot, both out of scope for this issue.
+// Follow-up tracked in the PR description for #46.
 func (e *Engine) Evaluate(
 	acct account.Account,
 	snap account.AccountSnapshot,
@@ -93,131 +103,255 @@ func (e *Engine) Evaluate(
 		})
 	}
 
-	for _, entry := range entries {
-		for _, rule := range rb.rules {
-			if rule.Scope != "position" {
-				continue
-			}
-			if rule.Mode == "block" {
-				continue
-			}
-			if !appliesMatches(rule.Applies, acct, entry.sec, entry.side) {
-				continue
-			}
-			activation := map[string]any{
-				"account":   acctAct,
-				"position":  entry.facts.activation(),
-				"security":  securityActivation(entry.sec),
-				"constants": rb.constants,
-			}
-			matched, err := evalBool(rule.whenProg, activation)
-			if err != nil {
-				out.Warnings = append(out.Warnings,
-					fmt.Sprintf("rule %q when eval error on position %s: %v", rule.ID, entry.pos.ID, err))
-				continue
-			}
-			if !matched {
-				continue
-			}
-			amount, err := evalNumber(rule.formulaProg, activation)
-			if err != nil {
-				out.Warnings = append(out.Warnings,
-					fmt.Sprintf("rule %q formula skipped on position %s: %v", rule.ID, entry.pos.ID, err))
-				continue
-			}
-			comp := composeComponent(rule, entry.pos.ID, entry.facts, amount)
-			out.Components = append(out.Components, comp)
-			if comp.Applied {
-				out.HouseRequirement += comp.Delta
-				out.HouseCashCall += comp.Delta
-			}
-		}
-	}
-
 	for _, rule := range rb.rules {
-		if rule.Scope != "group" {
-			continue
-		}
-		if rule.Mode == "block" {
-			continue
-		}
-		// Account-level applies filters (account_types, phases) gate the
-		// rule wholesale; the position-level filters (instrument_kinds,
-		// sides) gate per-position membership in the bucket.
-		if len(rule.Applies.AccountTypes) > 0 && !contains(rule.Applies.AccountTypes, string(acct.AccountType)) {
-			continue
-		}
-		if len(rule.Applies.Phases) > 0 && !contains(rule.Applies.Phases, string(acct.Phase)) {
-			continue
-		}
-
-		buckets := map[string]*groupFacts{}
-		for _, entry := range entries {
-			if !appliesMatches(rule.Applies, acct, entry.sec, entry.side) {
-				continue
-			}
-			key := groupKeyFor(rule.GroupBy, entry.facts)
-			if key == "" {
-				continue
-			}
-			g, ok := buckets[key]
-			if !ok {
-				g = &groupFacts{key: key}
-				buckets[key] = g
-			}
-			g.longMV += entry.facts.longMV
-			g.shortMV += entry.facts.shortMV
-			g.grossMV += entry.facts.grossMV
-			g.netMV += entry.facts.netMV
-			g.positionCount++
-			g.baselineSum += entry.baseRq
-			g.positions = append(g.positions, groupMember{id: entry.pos.ID, baselineReq: entry.baseRq})
-		}
-		if len(buckets) == 0 {
-			continue
-		}
-
-		keys := make([]string, 0, len(buckets))
-		for k := range buckets {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-
-		for _, k := range keys {
-			g := buckets[k]
-			activation := map[string]any{
-				"account":   acctAct,
-				"position":  map[string]any{},
-				"security":  map[string]any{},
-				"group":     g.activation(),
-				"constants": rb.constants,
-			}
-			matched, err := evalBool(rule.whenProg, activation)
-			if err != nil {
-				out.Warnings = append(out.Warnings,
-					fmt.Sprintf("rule %q when eval error on group %s: %v", rule.ID, k, err))
-				continue
-			}
-			if !matched {
-				continue
-			}
-			amount, err := evalNumber(rule.formulaProg, activation)
-			if err != nil {
-				out.Warnings = append(out.Warnings,
-					fmt.Sprintf("rule %q formula skipped on group %s: %v", rule.ID, k, err))
-				continue
-			}
-			comp := composeGroupComponent(rule, g, amount)
-			out.Components = append(out.Components, comp)
-			if comp.Applied {
-				out.HouseRequirement += comp.Delta
-				out.HouseCashCall += comp.Delta
-			}
+		switch rule.Scope {
+		case "position":
+			evaluatePositionRule(rule, entries, acct, acctAct, rb.constants, &out)
+		case "group":
+			evaluateGroupRule(rule, entries, acct, acctAct, rb.constants, &out)
 		}
 	}
 
 	out.Excess = snap.CurrentEquity - out.HouseRequirement
 	return out, nil
+}
+
+// evaluatePositionRule emits one AuditEntry per eligible position
+// (regardless of applies-matrix), optionally producing a
+// HouseComponent for matched + applied (rule, position) pairs.
+func evaluatePositionRule(
+	rule overlayRule,
+	entries []positionEntry,
+	acct account.Account,
+	acctAct map[string]any,
+	consts map[string]any,
+	out *HouseRequirement,
+) {
+	for _, entry := range entries {
+		ae := newAuditEntry(rule)
+		ae.PositionID = entry.pos.ID
+		ae.Symbol = entry.facts.symbol
+
+		if !appliesMatches(rule.Applies, acct, entry.sec, entry.side) {
+			out.Audit.Entries = append(out.Audit.Entries, ae)
+			continue
+		}
+
+		activation := map[string]any{
+			"account":   acctAct,
+			"position":  entry.facts.activation(),
+			"security":  securityActivation(entry.sec),
+			"constants": consts,
+		}
+		ae.Inputs = collectNumericInputs(activation)
+
+		matched, err := evalBool(rule.whenProg, activation)
+		if err != nil {
+			out.Warnings = append(out.Warnings,
+				fmt.Sprintf("rule %q when eval error on position %s: %v", rule.ID, entry.pos.ID, err))
+			out.Audit.Entries = append(out.Audit.Entries, ae)
+			continue
+		}
+		if !matched {
+			out.Audit.Entries = append(out.Audit.Entries, ae)
+			continue
+		}
+		ae.Matched = true
+
+		if rule.Mode == "block" {
+			var amt float64
+			if rule.formulaProg != nil {
+				if v, err := evalNumber(rule.formulaProg, activation); err == nil {
+					amt = v
+				} else {
+					out.Warnings = append(out.Warnings,
+						fmt.Sprintf("rule %q formula skipped on position %s: %v", rule.ID, entry.pos.ID, err))
+				}
+			}
+			comp := HouseComponent{
+				RuleID:        rule.ID,
+				Scope:         rule.Scope,
+				Mode:          rule.Mode,
+				Basis:         rule.Basis,
+				PositionID:    entry.pos.ID,
+				Symbol:        entry.facts.symbol,
+				OverlayAmount: amt,
+				Formula:       rule.Formula,
+				Reason:        rule.Reason,
+				Applied:       true,
+				Evidence: map[string]float64{
+					"position.long_market_value":  entry.facts.longMV,
+					"position.short_market_value": entry.facts.shortMV,
+					"position.gross_market_value": entry.facts.grossMV,
+					"overlay.amount":              amt,
+				},
+			}
+			out.Components = append(out.Components, comp)
+			ae.Applied = true
+			ae.Amount = amt
+			ae.Delta = 0
+			out.Audit.Entries = append(out.Audit.Entries, ae)
+			continue
+		}
+
+		amount, err := evalNumber(rule.formulaProg, activation)
+		if err != nil {
+			out.Warnings = append(out.Warnings,
+				fmt.Sprintf("rule %q formula skipped on position %s: %v", rule.ID, entry.pos.ID, err))
+			out.Audit.Entries = append(out.Audit.Entries, ae)
+			continue
+		}
+		comp := composeComponent(rule, entry.pos.ID, entry.facts, amount)
+		out.Components = append(out.Components, comp)
+		if comp.Applied {
+			out.HouseRequirement += comp.Delta
+			out.HouseCashCall += comp.Delta
+		}
+		ae.Applied = comp.Applied
+		ae.Amount = amount
+		ae.Delta = comp.Delta
+		out.Audit.Entries = append(out.Audit.Entries, ae)
+	}
+}
+
+// evaluateGroupRule buckets eligible positions per the rule's
+// group_by, then emits one AuditEntry per non-empty bucket. Buckets
+// are visited in byte-sorted key order so audit and component output
+// are byte-identical across runs.
+func evaluateGroupRule(
+	rule overlayRule,
+	entries []positionEntry,
+	acct account.Account,
+	acctAct map[string]any,
+	consts map[string]any,
+	out *HouseRequirement,
+) {
+	// Account-level applies filters (account_types, phases) gate the
+	// rule wholesale; the position-level filters (instrument_kinds,
+	// sides) gate per-position membership in the bucket.
+	if len(rule.Applies.AccountTypes) > 0 && !contains(rule.Applies.AccountTypes, string(acct.AccountType)) {
+		return
+	}
+	if len(rule.Applies.Phases) > 0 && !contains(rule.Applies.Phases, string(acct.Phase)) {
+		return
+	}
+
+	buckets := map[string]*groupFacts{}
+	for _, entry := range entries {
+		if !appliesMatches(rule.Applies, acct, entry.sec, entry.side) {
+			continue
+		}
+		key := groupKeyFor(rule.GroupBy, entry.facts)
+		if key == "" {
+			continue
+		}
+		g, ok := buckets[key]
+		if !ok {
+			g = &groupFacts{key: key}
+			buckets[key] = g
+		}
+		g.longMV += entry.facts.longMV
+		g.shortMV += entry.facts.shortMV
+		g.grossMV += entry.facts.grossMV
+		g.netMV += entry.facts.netMV
+		g.positionCount++
+		g.baselineSum += entry.baseRq
+		g.positions = append(g.positions, groupMember{id: entry.pos.ID, baselineReq: entry.baseRq})
+	}
+	if len(buckets) == 0 {
+		return
+	}
+
+	keys := make([]string, 0, len(buckets))
+	for k := range buckets {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		g := buckets[k]
+		ae := newAuditEntry(rule)
+		ae.GroupKey = g.key
+		ae.Symbol = g.key
+
+		activation := map[string]any{
+			"account":   acctAct,
+			"position":  map[string]any{},
+			"security":  map[string]any{},
+			"group":     g.activation(),
+			"constants": consts,
+		}
+		ae.Inputs = collectNumericInputs(activation)
+
+		matched, err := evalBool(rule.whenProg, activation)
+		if err != nil {
+			out.Warnings = append(out.Warnings,
+				fmt.Sprintf("rule %q when eval error on group %s: %v", rule.ID, k, err))
+			out.Audit.Entries = append(out.Audit.Entries, ae)
+			continue
+		}
+		if !matched {
+			out.Audit.Entries = append(out.Audit.Entries, ae)
+			continue
+		}
+		ae.Matched = true
+
+		if rule.Mode == "block" {
+			var amt float64
+			if rule.formulaProg != nil {
+				if v, err := evalNumber(rule.formulaProg, activation); err == nil {
+					amt = v
+				} else {
+					out.Warnings = append(out.Warnings,
+						fmt.Sprintf("rule %q formula skipped on group %s: %v", rule.ID, k, err))
+				}
+			}
+			comp := HouseComponent{
+				RuleID:        rule.ID,
+				Scope:         rule.Scope,
+				Mode:          rule.Mode,
+				Basis:         rule.Basis,
+				Symbol:        g.key,
+				GroupKey:      g.key,
+				OverlayAmount: amt,
+				Formula:       rule.Formula,
+				Reason:        rule.Reason,
+				Applied:       true,
+				Evidence: map[string]float64{
+					"group.long_market_value":  g.longMV,
+					"group.short_market_value": g.shortMV,
+					"group.gross_market_value": g.grossMV,
+					"group.net_market_value":   g.netMV,
+					"group.position_count":     float64(g.positionCount),
+					"overlay.amount":           amt,
+				},
+			}
+			out.Components = append(out.Components, comp)
+			ae.Applied = true
+			ae.Amount = amt
+			ae.Delta = 0
+			out.Audit.Entries = append(out.Audit.Entries, ae)
+			continue
+		}
+
+		amount, err := evalNumber(rule.formulaProg, activation)
+		if err != nil {
+			out.Warnings = append(out.Warnings,
+				fmt.Sprintf("rule %q formula skipped on group %s: %v", rule.ID, k, err))
+			out.Audit.Entries = append(out.Audit.Entries, ae)
+			continue
+		}
+		comp := composeGroupComponent(rule, g, amount)
+		out.Components = append(out.Components, comp)
+		if comp.Applied {
+			out.HouseRequirement += comp.Delta
+			out.HouseCashCall += comp.Delta
+		}
+		ae.Applied = comp.Applied
+		ae.Amount = amount
+		ae.Delta = comp.Delta
+		out.Audit.Entries = append(out.Audit.Entries, ae)
+	}
 }
 
 // composeGroupComponent fills a HouseComponent for a fired group-scope
