@@ -49,6 +49,26 @@ type Rule struct {
 	Match    MatchSpec    `yaml:"match"`
 	Requires RequireSpec  `yaml:"requires,omitempty"`
 	Formulas RuleFormulas `yaml:"formulas"`
+	// OptimizerTarget marks whether this rule is a valid decomposition template
+	// for the spread optimizer (Layer 0.5). Nil means "use the default policy"
+	// (see ruleIsDefaultOptimizerTarget); a non-nil value is an explicit YAML
+	// override that wins over the default — including for legs_pattern rules
+	// where an author may want to opt the catch-all back in.
+	OptimizerTarget *bool `yaml:"optimizer_target,omitempty"`
+}
+
+// ruleIsDefaultOptimizerTarget resolves whether a rule should be considered an
+// optimizer decomposition target. An explicit YAML `optimizer_target` always
+// wins; otherwise the default excludes the `all_options` catch-all and any
+// 1-slot rule (naked sinks like `long_option_*` / `short_*_uncovered`).
+func ruleIsDefaultOptimizerTarget(r Rule) bool {
+	if r.OptimizerTarget != nil {
+		return *r.OptimizerTarget
+	}
+	if r.Match.LegsPattern != "" {
+		return false
+	}
+	return len(r.Match.Legs) >= 2
 }
 
 // RequireSpec is the declarative pre-formula validation block. Each rule may

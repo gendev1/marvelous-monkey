@@ -971,3 +971,83 @@ func TestRequires_Collar_MismatchedUnderlyingRejected(t *testing.T) {
 	_, err := rb.Evaluate(pos, MarginAccount, Initial)
 	assertInvalidPositionErr(t, err, "collar", "underlying")
 }
+
+func TestRuleIsDefaultOptimizerTarget(t *testing.T) {
+	tt := true
+	ff := false
+	cases := []struct {
+		name string
+		rule Rule
+		want bool
+	}{
+		{
+			name: "1-slot naked rule defaults to false",
+			rule: Rule{Match: MatchSpec{Legs: []LegSlot{{Name: "sc"}}}},
+			want: false,
+		},
+		{
+			name: "2-slot rule defaults to true",
+			rule: Rule{Match: MatchSpec{Legs: []LegSlot{{Name: "long"}, {Name: "short"}}}},
+			want: true,
+		},
+		{
+			name: "all_options catch-all defaults to false",
+			rule: Rule{Match: MatchSpec{LegsPattern: "all_options"}},
+			want: false,
+		},
+		{
+			name: "explicit override false beats default true",
+			rule: Rule{
+				Match:           MatchSpec{Legs: []LegSlot{{Name: "sc"}, {Name: "conv"}}},
+				OptimizerTarget: &ff,
+			},
+			want: false,
+		},
+		{
+			name: "explicit override true beats default false (legs_pattern)",
+			rule: Rule{
+				Match:           MatchSpec{LegsPattern: "all_options"},
+				OptimizerTarget: &tt,
+			},
+			want: true,
+		},
+		{
+			name: "empty match defaults to false",
+			rule: Rule{},
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ruleIsDefaultOptimizerTarget(tc.rule); got != tc.want {
+				t.Errorf("ruleIsDefaultOptimizerTarget = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRulebookYAMLOverridesParse(t *testing.T) {
+	rb := loadRB(t)
+	want := map[string]bool{
+		"short_call_long_convertible": false,
+		"short_call_long_warrant":     false,
+	}
+	found := map[string]bool{}
+	for _, r := range rb.rules {
+		if w, ok := want[r.ID]; ok {
+			if r.OptimizerTarget == nil {
+				t.Errorf("rule %s: OptimizerTarget is nil, want explicit %v", r.ID, w)
+				continue
+			}
+			if *r.OptimizerTarget != w {
+				t.Errorf("rule %s: OptimizerTarget = %v, want %v", r.ID, *r.OptimizerTarget, w)
+			}
+			found[r.ID] = true
+		}
+	}
+	for id := range want {
+		if !found[id] {
+			t.Errorf("rule %s not present in loaded rulebook", id)
+		}
+	}
+}
