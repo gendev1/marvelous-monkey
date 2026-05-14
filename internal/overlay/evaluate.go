@@ -1,6 +1,7 @@
 package overlay
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -11,6 +12,14 @@ import (
 
 	"github.com/google/cel-go/cel"
 )
+
+// ErrNilEngineRulebook is returned by EvaluateHouse when the engine
+// rulebook argument is nil. Callers can match on it with errors.Is.
+var ErrNilEngineRulebook = errors.New("overlay: nil engine rulebook")
+
+// ErrNilOverlayRulebook is returned by EvaluateHouse when the overlay
+// rulebook argument is nil. Callers can match on it with errors.Is.
+var ErrNilOverlayRulebook = errors.New("overlay: nil overlay rulebook")
 
 // EvaluateHouse runs Layer 1 (engine per-position evaluation), Layer 2
 // (account aggregation), and Layer 3 (overlay) in sequence and returns
@@ -27,10 +36,10 @@ func EvaluateHouse(
 	ref ReferenceData,
 ) (HouseRequirement, error) {
 	if rb == nil {
-		return HouseRequirement{}, fmt.Errorf("overlay: nil engine rulebook")
+		return HouseRequirement{}, ErrNilEngineRulebook
 	}
 	if ob == nil {
-		return HouseRequirement{}, fmt.Errorf("overlay: nil overlay rulebook")
+		return HouseRequirement{}, ErrNilOverlayRulebook
 	}
 	snap, err := account.AggregateWithRulebook(rb, acct)
 	if err != nil {
