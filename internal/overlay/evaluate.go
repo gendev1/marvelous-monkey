@@ -39,6 +39,18 @@ type positionEntry struct {
 // not move the requirement total. Account- and symbol-scope rules are
 // skipped silently — their issues land later. Option positions are
 // also skipped (the overlay does not yet model option facts).
+//
+// Audit emission (#46) is wired here: out.Audit.Entries gets one
+// AuditEntry per (rule × eligible-target) pair, including non-matches.
+// Iteration order is outer-rule (the rulebook's deterministic order)
+// then inner-target (snapshot order for positions, byte-sorted key for
+// groups), so two Evaluate calls on identical inputs return DeepEqual
+// results.
+//
+// BaselineRulebookHash is intentionally left empty: surfacing a stable
+// digest requires either a new method on engine.Rulebook or threading
+// the hash through AccountSnapshot, both out of scope for this issue.
+// Follow-up tracked in the PR description for #46.
 func (e *Engine) Evaluate(
 	acct account.Account,
 	snap account.AccountSnapshot,
@@ -95,208 +107,278 @@ func (e *Engine) Evaluate(
 		})
 	}
 
-	// emittedRefWarning gates the per-position missing-ref warning so
-	// it fires at most once per position and is suppressed when an
-	// `error`-policy violation already covered the same condition.
-	emittedRefWarning := make(map[string]bool, len(entries))
+	// emittedRefViolation tracks which positions had at least one
+	// `on_missing_reference: error` rule fire, so the lazy missing-ref
+	// warning (emitted after all rules are processed) can be suppressed
+	// per D3. emittedRefWarning is the deduplication gate for that
+	// warning across rule iterations.
 	emittedRefViolation := make(map[string]bool, len(entries))
 
-	for i := range entries {
-		entry := &entries[i]
-		for _, rule := range rb.rules {
-			if rule.Scope != "position" {
-				continue
-			}
-			if !appliesMatches(rule.Applies, acct, entry.sec, entry.side) {
-				continue
-			}
-			// D3: missing-ref + error policy → emit a violation for
-			// this rule and skip evaluating it. The position-level
-			// warning is suppressed below in favor of the violation.
-			if entry.secMissing && rule.OnMissingReference == "error" {
-				out.Violations = append(out.Violations, HouseViolation{
-					RuleID:     rule.ID,
-					Scope:      rule.Scope,
-					PositionID: entry.pos.ID,
-					Symbol:     entry.facts.symbol,
-					Message: fmt.Sprintf(
-						"reference data missing for %s@%s; rule %q requires reference data",
-						entry.facts.primarySymbol, entry.facts.primaryVenue, rule.ID,
-					),
-				})
-				emittedRefViolation[entry.pos.ID] = true
-				continue
-			}
-
-			activation := map[string]any{
-				"account":   acctAct,
-				"position":  entry.facts.activation(),
-				"security":  securityActivation(entry.sec),
-				"constants": rb.constants,
-			}
-			matched, err := evalBool(rule.whenProg, activation)
-			if err != nil {
-				out.Warnings = append(out.Warnings,
-					fmt.Sprintf("rule %q when eval error on position %s: %v", rule.ID, entry.pos.ID, err))
-				continue
-			}
-			if !matched {
-				continue
-			}
-
-			if rule.Mode == "block" {
-				var amount float64
-				if rule.formulaProg != nil {
-					a, err := evalNumber(rule.formulaProg, activation)
-					if err != nil {
-						out.Warnings = append(out.Warnings,
-							fmt.Sprintf("rule %q formula skipped on position %s: %v", rule.ID, entry.pos.ID, err))
-						continue
-					}
-					amount = a
-				}
-				comp := composeBlockComponent(rule, entry.pos.ID, "", entry.facts, amount)
-				out.Components = append(out.Components, comp)
-				out.Violations = append(out.Violations, HouseViolation{
-					RuleID:     rule.ID,
-					Scope:      rule.Scope,
-					PositionID: entry.pos.ID,
-					Symbol:     entry.facts.symbol,
-					Message:    blockMessage(rule, "position"),
-				})
-				continue
-			}
-
-			amount, err := evalNumber(rule.formulaProg, activation)
-			if err != nil {
-				out.Warnings = append(out.Warnings,
-					fmt.Sprintf("rule %q formula skipped on position %s: %v", rule.ID, entry.pos.ID, err))
-				continue
-			}
-			comp := composeComponent(rule, entry.pos.ID, entry.facts, amount)
-			out.Components = append(out.Components, comp)
-			if comp.Applied {
-				out.HouseRequirement += comp.Delta
-				out.HouseCashCall += comp.Delta
-			}
-		}
-
-		// Per D3: emit the missing-ref warning lazily so the
-		// error-policy violation can replace it. The warning fires
-		// at most once per position and only when no error-policy
-		// violation has been emitted for the same position.
-		if entry.secMissing && !emittedRefWarning[entry.pos.ID] && !emittedRefViolation[entry.pos.ID] {
-			out.Warnings = append(out.Warnings,
-				fmt.Sprintf("reference data missing for %s@%s; defaulted instrument_kind=stock",
-					entry.facts.primarySymbol, entry.facts.primaryVenue))
-			emittedRefWarning[entry.pos.ID] = true
+	for _, rule := range rb.rules {
+		switch rule.Scope {
+		case "position":
+			evaluatePositionRule(rule, entries, acct, acctAct, rb.constants, &out, emittedRefViolation)
+		case "group":
+			evaluateGroupRule(rule, entries, acct, acctAct, rb.constants, &out)
 		}
 	}
 
-	for _, rule := range rb.rules {
-		if rule.Scope != "group" {
-			continue
-		}
-		// Account-level applies filters (account_types, phases) gate the
-		// rule wholesale; the position-level filters (instrument_kinds,
-		// sides) gate per-position membership in the bucket.
-		if len(rule.Applies.AccountTypes) > 0 && !contains(rule.Applies.AccountTypes, string(acct.AccountType)) {
-			continue
-		}
-		if len(rule.Applies.Phases) > 0 && !contains(rule.Applies.Phases, string(acct.Phase)) {
-			continue
-		}
-
-		buckets := map[string]*groupFacts{}
-		for _, entry := range entries {
-			if !appliesMatches(rule.Applies, acct, entry.sec, entry.side) {
-				continue
-			}
-			key := groupKeyFor(rule.GroupBy, entry.facts)
-			if key == "" {
-				continue
-			}
-			g, ok := buckets[key]
-			if !ok {
-				g = &groupFacts{key: key}
-				buckets[key] = g
-			}
-			g.longMV += entry.facts.longMV
-			g.shortMV += entry.facts.shortMV
-			g.grossMV += entry.facts.grossMV
-			g.netMV += entry.facts.netMV
-			g.positionCount++
-			g.baselineSum += entry.baseRq
-			g.positions = append(g.positions, groupMember{id: entry.pos.ID, baselineReq: entry.baseRq})
-		}
-		if len(buckets) == 0 {
-			continue
-		}
-
-		keys := make([]string, 0, len(buckets))
-		for k := range buckets {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-
-		for _, k := range keys {
-			g := buckets[k]
-			activation := map[string]any{
-				"account":   acctAct,
-				"position":  map[string]any{},
-				"security":  map[string]any{},
-				"group":     g.activation(),
-				"constants": rb.constants,
-			}
-			matched, err := evalBool(rule.whenProg, activation)
-			if err != nil {
-				out.Warnings = append(out.Warnings,
-					fmt.Sprintf("rule %q when eval error on group %s: %v", rule.ID, k, err))
-				continue
-			}
-			if !matched {
-				continue
-			}
-
-			if rule.Mode == "block" {
-				var amount float64
-				if rule.formulaProg != nil {
-					a, err := evalNumber(rule.formulaProg, activation)
-					if err != nil {
-						out.Warnings = append(out.Warnings,
-							fmt.Sprintf("rule %q formula skipped on group %s: %v", rule.ID, k, err))
-						continue
-					}
-					amount = a
-				}
-				comp := composeGroupBlockComponent(rule, g, amount)
-				out.Components = append(out.Components, comp)
-				out.Violations = append(out.Violations, HouseViolation{
-					RuleID:   rule.ID,
-					Scope:    rule.Scope,
-					GroupKey: g.key,
-					Message:  blockMessage(rule, "group"),
-				})
-				continue
-			}
-
-			amount, err := evalNumber(rule.formulaProg, activation)
-			if err != nil {
-				out.Warnings = append(out.Warnings,
-					fmt.Sprintf("rule %q formula skipped on group %s: %v", rule.ID, k, err))
-				continue
-			}
-			comp := composeGroupComponent(rule, g, amount)
-			out.Components = append(out.Components, comp)
-			if comp.Applied {
-				out.HouseRequirement += comp.Delta
-				out.HouseCashCall += comp.Delta
-			}
+	// Per D3: emit the missing-ref warning lazily so an error-policy
+	// violation on the same position can replace it. Warnings fire at
+	// most once per position, in entry (snapshot) order.
+	for _, entry := range entries {
+		if entry.secMissing && !emittedRefViolation[entry.pos.ID] {
+			out.Warnings = append(out.Warnings,
+				fmt.Sprintf("reference data missing for %s@%s; defaulted instrument_kind=stock",
+					entry.facts.primarySymbol, entry.facts.primaryVenue))
 		}
 	}
 
 	out.Excess = snap.CurrentEquity - out.HouseRequirement
 	return out, nil
+}
+
+// evaluatePositionRule iterates one rule across every eligible
+// position. One AuditEntry is appended per (rule, position), even when
+// the rule is excluded by applies, skipped by an error-policy
+// missing-ref violation, or evaluates `when` to false. HouseComponents
+// and HouseViolations are emitted only on the match paths documented
+// in Evaluate.
+func evaluatePositionRule(
+	rule overlayRule,
+	entries []positionEntry,
+	acct account.Account,
+	acctAct map[string]any,
+	consts map[string]any,
+	out *HouseRequirement,
+	emittedRefViolation map[string]bool,
+) {
+	for _, entry := range entries {
+		ae := newAuditEntry(rule)
+		ae.PositionID = entry.pos.ID
+		ae.Symbol = entry.facts.symbol
+
+		if !appliesMatches(rule.Applies, acct, entry.sec, entry.side) {
+			out.Audit.Entries = append(out.Audit.Entries, ae)
+			continue
+		}
+
+		// D3: missing-ref + error policy → emit a violation for this
+		// (rule, position) and skip evaluating it. Audit row still
+		// records the consideration with Matched=false (when never
+		// ran).
+		if entry.secMissing && rule.OnMissingReference == "error" {
+			out.Violations = append(out.Violations, HouseViolation{
+				RuleID:     rule.ID,
+				Scope:      rule.Scope,
+				PositionID: entry.pos.ID,
+				Symbol:     entry.facts.symbol,
+				Message: fmt.Sprintf(
+					"reference data missing for %s@%s; rule %q requires reference data",
+					entry.facts.primarySymbol, entry.facts.primaryVenue, rule.ID,
+				),
+			})
+			emittedRefViolation[entry.pos.ID] = true
+			out.Audit.Entries = append(out.Audit.Entries, ae)
+			continue
+		}
+
+		activation := map[string]any{
+			"account":   acctAct,
+			"position":  entry.facts.activation(),
+			"security":  securityActivation(entry.sec),
+			"constants": consts,
+		}
+		ae.Inputs = collectNumericInputs(activation)
+
+		matched, err := evalBool(rule.whenProg, activation)
+		if err != nil {
+			out.Warnings = append(out.Warnings,
+				fmt.Sprintf("rule %q when eval error on position %s: %v", rule.ID, entry.pos.ID, err))
+			out.Audit.Entries = append(out.Audit.Entries, ae)
+			continue
+		}
+		if !matched {
+			out.Audit.Entries = append(out.Audit.Entries, ae)
+			continue
+		}
+		ae.Matched = true
+
+		if rule.Mode == "block" {
+			var amount float64
+			if rule.formulaProg != nil {
+				a, err := evalNumber(rule.formulaProg, activation)
+				if err != nil {
+					out.Warnings = append(out.Warnings,
+						fmt.Sprintf("rule %q formula skipped on position %s: %v", rule.ID, entry.pos.ID, err))
+					out.Audit.Entries = append(out.Audit.Entries, ae)
+					continue
+				}
+				amount = a
+			}
+			comp := composeBlockComponent(rule, entry.pos.ID, "", entry.facts, amount)
+			out.Components = append(out.Components, comp)
+			out.Violations = append(out.Violations, HouseViolation{
+				RuleID:     rule.ID,
+				Scope:      rule.Scope,
+				PositionID: entry.pos.ID,
+				Symbol:     entry.facts.symbol,
+				Message:    blockMessage(rule, "position"),
+			})
+			ae.Applied = true
+			ae.Amount = amount
+			ae.Delta = 0
+			out.Audit.Entries = append(out.Audit.Entries, ae)
+			continue
+		}
+
+		amount, err := evalNumber(rule.formulaProg, activation)
+		if err != nil {
+			out.Warnings = append(out.Warnings,
+				fmt.Sprintf("rule %q formula skipped on position %s: %v", rule.ID, entry.pos.ID, err))
+			out.Audit.Entries = append(out.Audit.Entries, ae)
+			continue
+		}
+		comp := composeComponent(rule, entry.pos.ID, entry.facts, amount)
+		out.Components = append(out.Components, comp)
+		if comp.Applied {
+			out.HouseRequirement += comp.Delta
+			out.HouseCashCall += comp.Delta
+		}
+		ae.Applied = comp.Applied
+		ae.Amount = amount
+		ae.Delta = comp.Delta
+		out.Audit.Entries = append(out.Audit.Entries, ae)
+	}
+}
+
+// evaluateGroupRule buckets eligible positions per the rule's
+// group_by, then emits one AuditEntry per non-empty bucket (sorted by
+// key). HouseComponents and HouseViolations follow the same
+// emission rules as the position scope.
+func evaluateGroupRule(
+	rule overlayRule,
+	entries []positionEntry,
+	acct account.Account,
+	acctAct map[string]any,
+	consts map[string]any,
+	out *HouseRequirement,
+) {
+	// Account-level applies filters (account_types, phases) gate the
+	// rule wholesale; the position-level filters (instrument_kinds,
+	// sides) gate per-position membership in the bucket.
+	if len(rule.Applies.AccountTypes) > 0 && !contains(rule.Applies.AccountTypes, string(acct.AccountType)) {
+		return
+	}
+	if len(rule.Applies.Phases) > 0 && !contains(rule.Applies.Phases, string(acct.Phase)) {
+		return
+	}
+
+	buckets := map[string]*groupFacts{}
+	for _, entry := range entries {
+		if !appliesMatches(rule.Applies, acct, entry.sec, entry.side) {
+			continue
+		}
+		key := groupKeyFor(rule.GroupBy, entry.facts)
+		if key == "" {
+			continue
+		}
+		g, ok := buckets[key]
+		if !ok {
+			g = &groupFacts{key: key}
+			buckets[key] = g
+		}
+		g.longMV += entry.facts.longMV
+		g.shortMV += entry.facts.shortMV
+		g.grossMV += entry.facts.grossMV
+		g.netMV += entry.facts.netMV
+		g.positionCount++
+		g.baselineSum += entry.baseRq
+		g.positions = append(g.positions, groupMember{id: entry.pos.ID, baselineReq: entry.baseRq})
+	}
+	if len(buckets) == 0 {
+		return
+	}
+
+	keys := make([]string, 0, len(buckets))
+	for k := range buckets {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		g := buckets[k]
+		ae := newAuditEntry(rule)
+		ae.GroupKey = g.key
+		ae.Symbol = g.key
+
+		activation := map[string]any{
+			"account":   acctAct,
+			"position":  map[string]any{},
+			"security":  map[string]any{},
+			"group":     g.activation(),
+			"constants": consts,
+		}
+		ae.Inputs = collectNumericInputs(activation)
+
+		matched, err := evalBool(rule.whenProg, activation)
+		if err != nil {
+			out.Warnings = append(out.Warnings,
+				fmt.Sprintf("rule %q when eval error on group %s: %v", rule.ID, k, err))
+			out.Audit.Entries = append(out.Audit.Entries, ae)
+			continue
+		}
+		if !matched {
+			out.Audit.Entries = append(out.Audit.Entries, ae)
+			continue
+		}
+		ae.Matched = true
+
+		if rule.Mode == "block" {
+			var amount float64
+			if rule.formulaProg != nil {
+				a, err := evalNumber(rule.formulaProg, activation)
+				if err != nil {
+					out.Warnings = append(out.Warnings,
+						fmt.Sprintf("rule %q formula skipped on group %s: %v", rule.ID, k, err))
+					out.Audit.Entries = append(out.Audit.Entries, ae)
+					continue
+				}
+				amount = a
+			}
+			comp := composeGroupBlockComponent(rule, g, amount)
+			out.Components = append(out.Components, comp)
+			out.Violations = append(out.Violations, HouseViolation{
+				RuleID:   rule.ID,
+				Scope:    rule.Scope,
+				GroupKey: g.key,
+				Message:  blockMessage(rule, "group"),
+			})
+			ae.Applied = true
+			ae.Amount = amount
+			ae.Delta = 0
+			out.Audit.Entries = append(out.Audit.Entries, ae)
+			continue
+		}
+
+		amount, err := evalNumber(rule.formulaProg, activation)
+		if err != nil {
+			out.Warnings = append(out.Warnings,
+				fmt.Sprintf("rule %q formula skipped on group %s: %v", rule.ID, k, err))
+			out.Audit.Entries = append(out.Audit.Entries, ae)
+			continue
+		}
+		comp := composeGroupComponent(rule, g, amount)
+		out.Components = append(out.Components, comp)
+		if comp.Applied {
+			out.HouseRequirement += comp.Delta
+			out.HouseCashCall += comp.Delta
+		}
+		ae.Applied = comp.Applied
+		ae.Amount = amount
+		ae.Delta = comp.Delta
+		out.Audit.Entries = append(out.Audit.Entries, ae)
+	}
 }
 
 // composeGroupComponent fills a HouseComponent for a fired group-scope
