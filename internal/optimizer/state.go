@@ -25,11 +25,21 @@ type State struct {
 }
 
 // buildState canonicalizes the caller's input legs into a State: validates the
-// "exactly one of OpenQty/OpenShares > 0" rule, drops sub-epsilon entries, and
-// sorts by LegID for determinism.
+// "exactly one of OpenQty/OpenShares > 0" rule, rejects duplicate LegIDs (the
+// LegID-keyed aggregation in applyConsumption would otherwise silently merge
+// distinct legs), drops sub-epsilon entries, and sorts by LegID for
+// determinism.
 func buildState(legs []WorkingLeg) (State, error) {
+	seen := make(map[LegID]struct{}, len(legs))
 	out := make([]WorkingLeg, 0, len(legs))
 	for _, wl := range legs {
+		if _, dup := seen[wl.ID]; dup {
+			return State{}, fmt.Errorf(
+				"invalid WorkingLeg %q: LegID must be unique within one Optimize call",
+				string(wl.ID),
+			)
+		}
+		seen[wl.ID] = struct{}{}
 		// Negative open inventory is malformed input, not a "not-live" leg
 		// — silently dropping it would mask broken upstream accounting and
 		// understate decomposition totals. The > epsQty live-checks below
@@ -57,11 +67,14 @@ func buildState(legs []WorkingLeg) (State, error) {
 
 // applyConsumption returns a new State with the consumption plan's amounts
 // subtracted from the matching input legs. Lookup is by LegID — never by
-// engine.Leg struct identity, per §"Optimizer types". Legs whose remaining
-// OpenQty AND OpenShares fall to ≤ epsQty are dropped so the memo key (and
-// recursion fanout) shrinks each step. The resulting Legs slice is a fresh
-// allocation and remains sorted by LegID since state.Legs was already
-// LegID-sorted by buildState and we walk it in that order.
+// engine.Leg struct identity, per §"Optimizer types". Invariant: WorkingLeg
+// IDs must be unique within state.Legs (enforced by buildState); duplicate
+// IDs would silently merge into one consumption bucket here and corrupt the
+// remaining state. Legs whose remaining OpenQty AND OpenShares fall to ≤
+// epsQty are dropped so the memo key (and recursion fanout) shrinks each
+// step. The resulting Legs slice is a fresh allocation and remains sorted by
+// LegID since state.Legs was already LegID-sorted by buildState and we walk
+// it in that order.
 func applyConsumption(state State, assignment map[string]WorkingLeg, plan ConsumptionPlan) State {
 	consumed := make(map[LegID]ConsumedAmount, len(assignment))
 	for name, wl := range assignment {

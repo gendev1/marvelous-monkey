@@ -453,6 +453,26 @@ func TestWorkingLegBothPositive_Rejected(t *testing.T) {
 	}
 }
 
+// TestDuplicateLegID_Rejected locks the buildState invariant that LegIDs are
+// unique within one Optimize call: applyConsumption aggregates by LegID, so
+// duplicates would silently merge into one consumption bucket and corrupt the
+// remaining state.
+func TestDuplicateLegID_Rejected(t *testing.T) {
+	opt := newOpt(t)
+	legs := []WorkingLeg{
+		{ID: "dup", OpenQty: 1, Leg: engine.Leg{
+			Side: engine.Long, Kind: engine.OptionKind, OptionType: "call",
+		}},
+		{ID: "dup", OpenQty: 2, Leg: engine.Leg{
+			Side: engine.Short, Kind: engine.OptionKind, OptionType: "put",
+		}},
+	}
+	_, err := opt.Optimize(equityFacts, legs)
+	if err == nil {
+		t.Fatalf("expected validation error for duplicate LegID, got nil")
+	}
+}
+
 // =============================================================================
 // PR-3: B&B / option-only tests
 // =============================================================================
