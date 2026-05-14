@@ -26,4 +26,11 @@
 // Working example: rules/house_overlay.example.yaml ships a runnable
 // overlay rulebook covering position-scope floor/block modes and
 // group-scope max — load this for a working example of the schema.
+//
+// Entry points: small consumers (tests, README examples, one-off
+// scripts) should call EvaluateHouse, which composes Layer 1 → Layer 2
+// → Layer 3 in a single call. Larger callers that need cross-cutting
+// concerns — cancellation, telemetry, multi-regime selection — should
+// wait for the future internal/regime orchestrator rather than growing
+// EvaluateHouse; the wrapper is intentionally stateless and thin.
 package overlay

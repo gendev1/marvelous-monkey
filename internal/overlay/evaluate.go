@@ -7,9 +7,42 @@ import (
 	"sort"
 
 	"margincalc/internal/account"
+	"margincalc/internal/engine"
 
 	"github.com/google/cel-go/cel"
 )
+
+// EvaluateHouse runs Layer 1 (engine per-position evaluation), Layer 2
+// (account aggregation), and Layer 3 (overlay) in sequence and returns
+// the final HouseRequirement. It is a thin convenience composer for
+// callers that don't need cross-cutting concerns such as cancellation,
+// telemetry, or multi-regime selection — those belong to the future
+// internal/regime orchestrator.
+//
+// Errors from either layer are wrapped with an "overlay: " prefix.
+func EvaluateHouse(
+	rb *engine.Rulebook,
+	ob *Rulebook,
+	acct account.Account,
+	ref ReferenceData,
+) (HouseRequirement, error) {
+	if rb == nil {
+		return HouseRequirement{}, fmt.Errorf("overlay: nil engine rulebook")
+	}
+	if ob == nil {
+		return HouseRequirement{}, fmt.Errorf("overlay: nil overlay rulebook")
+	}
+	snap, err := account.AggregateWithRulebook(rb, acct)
+	if err != nil {
+		return HouseRequirement{}, fmt.Errorf("overlay: aggregate: %w", err)
+	}
+	eng := &Engine{Rulebook: ob}
+	hr, err := eng.Evaluate(acct, snap, ref)
+	if err != nil {
+		return HouseRequirement{}, fmt.Errorf("overlay: evaluate: %w", err)
+	}
+	return hr, nil
+}
 
 // positionEntry is the per-position eligibility record computed once
 // per Evaluate call and reused by both the position-scope and

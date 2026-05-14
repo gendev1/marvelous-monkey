@@ -1097,6 +1097,107 @@ func deepCopyAccount(a account.Account) account.Account {
 	return out
 }
 
+// --- EvaluateHouse wrapper ---------------------------------------------------
+
+func TestEvaluateHouse_HappyPath_MatchesManualComposition(t *testing.T) {
+	engineRB := loadIntegrationEngineRulebook(t)
+	overlayRB := loadIntegrationOverlay(t)
+
+	pA := integrationStock("pA", "AAPL", "listed", engine.Long, 1000, 4.50)
+	pB := integrationStock("pB", "MSFT", "listed", engine.Long, 50, 400.0)
+	acct := account.Account{
+		ID:          "ACCT-EH",
+		AccountType: engine.MarginAccount,
+		Phase:       engine.Maintenance,
+		AsOf:        time.Date(2026, 5, 13, 0, 0, 0, 0, time.UTC),
+		Currency:    "USD",
+		SODEquity:   50000,
+		CashBalance: 50000,
+		Positions:   []account.AccountPosition{pA, pB},
+	}
+	ref := ReferenceData{Securities: map[SecKey]SecurityFacts{
+		{Symbol: "AAPL", Venue: "listed"}: {
+			Symbol: "AAPL", Venue: "listed",
+			InstrumentKind: "stock", LastPrice: 4.50, Marginable: true,
+		},
+		{Symbol: "MSFT", Venue: "listed"}: {
+			Symbol: "MSFT", Venue: "listed",
+			InstrumentKind: "stock", LastPrice: 400.0, Marginable: true,
+		},
+	}}
+
+	gotHR, err := EvaluateHouse(engineRB, overlayRB, acct, ref)
+	if err != nil {
+		t.Fatalf("EvaluateHouse: %v", err)
+	}
+
+	snap, err := account.AggregateWithRulebook(engineRB, acct)
+	if err != nil {
+		t.Fatalf("AggregateWithRulebook: %v", err)
+	}
+	eng := &Engine{Rulebook: overlayRB}
+	wantHR, err := eng.Evaluate(acct, snap, ref)
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+
+	if !reflect.DeepEqual(gotHR, wantHR) {
+		t.Errorf("EvaluateHouse result differs from manual composition\n got: %+v\nwant: %+v", gotHR, wantHR)
+	}
+}
+
+func TestEvaluateHouse_AggregateError_PropagatesWithPrefix(t *testing.T) {
+	engineRB := loadIntegrationEngineRulebook(t)
+	overlayRB := loadIntegrationOverlay(t)
+
+	// Duplicate position IDs trip validate() inside AggregateWithRulebook.
+	pA := integrationStock("dup", "AAPL", "listed", engine.Long, 100, 150.0)
+	pB := integrationStock("dup", "MSFT", "listed", engine.Long, 50, 400.0)
+	acct := account.Account{
+		ID:          "ACCT-EH-DUP",
+		AccountType: engine.MarginAccount,
+		Phase:       engine.Maintenance,
+		AsOf:        time.Date(2026, 5, 13, 0, 0, 0, 0, time.UTC),
+		Currency:    "USD",
+		SODEquity:   50000,
+		CashBalance: 50000,
+		Positions:   []account.AccountPosition{pA, pB},
+	}
+
+	_, err := EvaluateHouse(engineRB, overlayRB, acct, ReferenceData{})
+	if err == nil {
+		t.Fatal("EvaluateHouse: expected error from duplicate position id, got nil")
+	}
+	if !strings.HasPrefix(err.Error(), "overlay: aggregate:") {
+		t.Errorf("error %q lacks %q prefix", err.Error(), "overlay: aggregate:")
+	}
+}
+
+func TestEvaluateHouse_EvaluateError_PropagatesWithPrefix(t *testing.T) {
+	// Engine.Evaluate currently does not return errors for valid inputs;
+	// missing-data conditions surface as Warnings/Violations, not Go
+	// errors. This test is a guard against future regressions: when an
+	// error path is added, drop the Skip and assert the "overlay: evaluate:"
+	// wrap.
+	t.Skip("no error path from Engine.Evaluate today; see issue #48 acceptance criteria")
+}
+
+func TestEvaluateHouse_NilEngineRulebook(t *testing.T) {
+	overlayRB := loadIntegrationOverlay(t)
+	_, err := EvaluateHouse(nil, overlayRB, baseAccount(), ReferenceData{})
+	if err == nil || err.Error() != "overlay: nil engine rulebook" {
+		t.Errorf("got %v, want %q", err, "overlay: nil engine rulebook")
+	}
+}
+
+func TestEvaluateHouse_NilOverlayRulebook(t *testing.T) {
+	engineRB := loadIntegrationEngineRulebook(t)
+	_, err := EvaluateHouse(engineRB, nil, baseAccount(), ReferenceData{})
+	if err == nil || err.Error() != "overlay: nil overlay rulebook" {
+		t.Errorf("got %v, want %q", err, "overlay: nil overlay rulebook")
+	}
+}
+
 func deepCopySnapshot(s account.AccountSnapshot) account.AccountSnapshot {
 	out := s
 	out.Evaluations = append([]account.PositionEvaluation(nil), s.Evaluations...)
