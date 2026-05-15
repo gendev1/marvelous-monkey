@@ -53,7 +53,7 @@ Everything under `internal/` is module-private — Go won't let any package outs
 
 ## The engine
 
-Position-level, single-strategy. Takes a `Position`, returns a `Result` with three numbers per the manual's distinction:
+Position-level, single-strategy. Takes a `Position` (a pre-classified strategy — one rule's worth of legs) and returns a `Result` with three numbers per the manual's distinction. For arbitrary multi-leg portfolios that haven't been pre-classified, see `internal/optimizer/`, which decomposes them into recognized strategies before evaluation.
 
 | Field | Meaning |
 |---|---|

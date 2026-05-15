@@ -1,6 +1,6 @@
 # margincalc · status
 
-**main** `54c02e5` · updated 2026-05-13
+**main** `54c02e5` · updated 2026-05-14
 
 Strategy-based RegT engine. Three-layer architecture. Vendor-free.
 
@@ -8,7 +8,7 @@ Strategy-based RegT engine. Three-layer architecture. Vendor-free.
 
 | Tests | Cboe examples | Rules | Layers | Active | Backlog |
 |------:|--------------:|------:|-------:|-------:|--------:|
-| 273   | 22            | 20    | 3 (+L0.5 designed) | 0 | 8 |
+| 273   | 22            | 20    | 4 (+L0.5 shipped) | 0 | 8 |
 
 ## Three layers
 
@@ -78,7 +78,7 @@ _None — Layer 3 overlay MVP landed; next sequenced work is in the backlog belo
 | 07A | **Deferred rich overlay dimensions** — Volatility buckets, market-cap, ADV / liquidity, sector concentration, HTB, exposure fees. Requires stable vendor/reference data evidence.                    | Layer 3  | later  |
 | 08 | **Risk-shock engine ("poor-man's PM")** — Delta-based ±20% / ±50%, ±3σ, single-name 50%, worst-case + 5% liquidity haircut. TIMS-shaped number without a vol surface.                                | Layer 1+ | later  |
 | 09 | **Universal Spread Rule** — Cross-position 2-leg pair-up; sum requirements per Sterling. Prereq for portfolio-level RegT.                                                                          | Layer 1  | later  |
-| 13 | **Layer 0.5 — spread optimizer** — Branch-and-bound decomposition of arbitrary multi-leg portfolios into recognized strategies, with per-leg attribution. **Designed, not built.** See `docs/architecture/spread-optimizer.md`. Gating capability for margincalc-as-a-product. | Layer 0.5 | designed |
+| 13 | **Layer 0.5 — spread optimizer** — Branch-and-bound decomposition of arbitrary multi-leg portfolios into recognized strategies, with per-leg attribution. **Shipped.** See `internal/optimizer/`. Gating capability for margincalc-as-a-product. | Layer 0.5 | shipped |
 | 11 | **Multi-regime margin router** — Add `internal/margin` normalized account result types and `internal/regime` selector/orchestrator so Reg T, house overlay, and future TIMS/SPAN/shock engines share one account-level contract. See `docs/epics/multi-regime-margin-plan.md`. | Cross-layer | later |
 
 ## Deferred · explicitly parked
@@ -99,8 +99,8 @@ _None — Layer 3 overlay MVP landed; next sequenced work is in the backlog belo
 
 ## Sequencing
 
-Engine correctness (#01), the Layer 2 aggregator (#03), the Layer 3 house-overlay MVP (#07), and the cross-layer review-fix pass (#12) are done — `internal/overlay` ships `HouseRequirement`, reference data, low-price floors, single-name concentration, and component attribution with an audit trail; the engine's concurrent-`Evaluate` invariant is now actually enforced. Remaining Layer 3 work is symbol/account/group percentage overrides and house-overlay reconciliation. The gating capability for margincalc-as-a-product is **Layer 0.5 — the spread optimizer (#13)**, which lets callers submit arbitrary leg portfolios instead of pre-classified strategies; design is in `docs/architecture/spread-optimizer.md`, implementation not yet started. The multi-regime router (#11) lands alongside or after L0.5 so Reg T, house overlay, and future engines share one account-level result contract. Account-level reconciliation (#04) stays parked until a vendor API contract exists. Recon hardening (#02) gets revisited when nightly vendor runs are actually on the table.
+Engine correctness (#01), the Layer 2 aggregator (#03), the Layer 3 house-overlay MVP (#07), and the cross-layer review-fix pass (#12) are done — `internal/overlay` ships `HouseRequirement`, reference data, low-price floors, single-name concentration, and component attribution with an audit trail; the engine's concurrent-`Evaluate` invariant is now actually enforced. Remaining Layer 3 work is symbol/account/group percentage overrides and house-overlay reconciliation. The gating capability for margincalc-as-a-product — **Layer 0.5, the spread optimizer (#13)** — is shipped: `internal/optimizer.Optimize` branch-and-bounds arbitrary leg portfolios into recognized strategies with per-leg attribution, so callers no longer have to pre-classify. The multi-regime router (#11) lands alongside or after L0.5 so Reg T, house overlay, and future engines share one account-level result contract. Account-level reconciliation (#04) stays parked until a vendor API contract exists. Recon hardening (#02) gets revisited when nightly vendor runs are actually on the table.
 
 ---
 
-*Generated 2026-05-13 · main @ `54c02e5` · living doc — edit freely as the project advances.*
+*Generated 2026-05-14 · main @ `54c02e5` · living doc — edit freely as the project advances.*
