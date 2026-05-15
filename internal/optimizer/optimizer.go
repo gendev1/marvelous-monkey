@@ -82,6 +82,12 @@ type Decomposition struct {
 	SubPositions     []SubPosition
 	Attributions     map[LegID][]Attribution
 	TotalRequirement float64
+
+	// err carries a propagated error through the memoized recursion. Unexported
+	// so external callers always interact through the (Decomposition, error)
+	// return of Optimize; IsError/Err expose it for the few internal callers
+	// (combine, the test harness) that need to introspect a carrier.
+	err error
 }
 
 // ErrNoNakedRule is the residual-completion failure mode: a working option
@@ -123,12 +129,19 @@ func New(rb *engine.Rulebook) *Optimizer {
 	return &Optimizer{rb: rb}
 }
 
-// Optimize runs the residual-only decomposition: every WorkingLeg is scored
-// independently against the naked-rule sequence (or rejected as unsupported
-// for stock). Sub-positions accumulate in input order; if one or more legs
-// fail, the strongest-priority error wins (see compareResidualErr) and the
-// returned Decomposition still contains the sub-positions scored before the
-// failure (partial-output contract).
+// Optimize runs the branch-and-bound decomposition over the working legs:
+// every state is scored against every (optimizer-target rule, valid
+// assignment, viable consumption plan) candidate; the recursive remainder
+// is scored the same way; residual-only completion is always considered as
+// a baseline. The cheapest decomposition under the documented tiebreak
+// (see less) wins. Memoization on State.Key() keeps total work proportional
+// to the number of distinct reachable states.
+//
+// Residual-only behavior is preserved end-to-end: a state with no viable
+// B&B branch falls through to residualOptionRule for every leg, and the
+// strongest-priority residual error (see compareResidualErr) wins. The
+// returned Decomposition carries whatever sub-positions were scored before
+// the failure (partial-output contract).
 //
 // An empty legs slice returns Decomposition{} with TotalRequirement=0 and no
 // error. A leg with both OpenQty and OpenShares > 0 violates the input
@@ -150,9 +163,28 @@ func (o *Optimizer) Optimize(facts BucketFacts, legs []WorkingLeg) (Decompositio
 				string(wl.ID), wl.OpenQty, wl.OpenShares)
 		}
 	}
+	state := newState(legs)
+	memo := map[string]Decomposition{}
+	result := o.decompose(state, facts, memo, nil)
+	if result.IsError() {
+		err := result.err
+		result.err = nil
+		result.Attributions = buildAttributions(result.SubPositions)
+		return result, err
+	}
+	result.Attributions = buildAttributions(result.SubPositions)
+	return result, nil
+}
+
+// scoreAllResidual scores every working leg in s independently via
+// residualOptionRule (or rejects shares as unsupported in this PR). It is
+// the residual-only completion path called from decompose; the strongest
+// residual error wins and any successfully-scored sub-positions ride along
+// in the returned Decomposition.
+func (o *Optimizer) scoreAllResidual(s State, facts BucketFacts) (Decomposition, error) {
 	dec := Decomposition{}
 	var strongest error
-	for _, wl := range legs {
+	for _, wl := range s.Legs {
 		if wl.OpenShares > 0 {
 			candidate := &ErrStockResidualUnsupported{LegID: wl.ID, OpenShares: wl.OpenShares, Leg: wl.Leg}
 			strongest = takeStronger(strongest, candidate)
@@ -168,14 +200,10 @@ func (o *Optimizer) Optimize(facts BucketFacts, legs []WorkingLeg) (Decompositio
 		}
 		dec.SubPositions = append(dec.SubPositions, sub)
 	}
-	dec.Attributions = buildAttributions(dec.SubPositions)
 	for _, sp := range dec.SubPositions {
 		dec.TotalRequirement += sp.Result.Requirement
 	}
-	if strongest != nil {
-		return dec, strongest
-	}
-	return dec, nil
+	return dec, strongest
 }
 
 // takeStronger returns whichever of (current, candidate) ranks higher under
