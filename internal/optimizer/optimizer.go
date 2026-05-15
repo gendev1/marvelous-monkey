@@ -153,11 +153,21 @@ func (o *Optimizer) Optimize(facts BucketFacts, legs []WorkingLeg) (Decompositio
 	if o == nil || o.rb == nil {
 		return Decomposition{}, fmt.Errorf("optimizer: nil Optimizer or rulebook (constructed with New(nil)?)")
 	}
-	// Validate the input invariant up-front so the early return on a violation
+	// Validate the input invariants up-front so the early return on a violation
 	// doesn't leave Decomposition partially populated (no Attributions, no
 	// TotalRequirement) — an inconsistent state would defeat the
 	// partial-output contract and confuse callers.
+	//
+	// Duplicate LegIDs are rejected because the B&B path keys memoization,
+	// consumption deltas, and Attributions by LegID — two working legs sharing
+	// an ID would silently merge their open quantity into one bucket and
+	// misattribute the result.
+	seen := make(map[LegID]struct{}, len(legs))
 	for _, wl := range legs {
+		if _, dup := seen[wl.ID]; dup {
+			return Decomposition{}, fmt.Errorf("optimizer: duplicate LegID %q (invariant violation)", string(wl.ID))
+		}
+		seen[wl.ID] = struct{}{}
 		if wl.OpenQty > 0 && wl.OpenShares > 0 {
 			return Decomposition{}, fmt.Errorf("optimizer: leg %q has both OpenQty (%g) and OpenShares (%g) > 0 (invariant violation)",
 				string(wl.ID), wl.OpenQty, wl.OpenShares)
