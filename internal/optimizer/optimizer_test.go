@@ -5,6 +5,7 @@ import (
 	"math"
 	"reflect"
 	"testing"
+	"time"
 
 	"margincalc/internal/engine"
 )
@@ -1351,5 +1352,233 @@ func TestETFCoverage_ZeroUIsHardError(t *testing.T) {
 	var stockErr *ErrStockResidualUnsupported
 	if errors.As(err, &noNaked) || errors.As(err, &stockErr) {
 		t.Fatalf("zero-U should not surface as a residual sentinel, got %T %v", err, err)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Quantity-slicing at scale (epic tests 3, 4, 8) and pruning instrumentation
+// (epic test 14). These exercise the deliverable-units policy on non-trivial
+// OpenQty and pin the same-leg-class no-coalesce contract for v1.
+
+func slicedLongCall(id string, qty float64, k float64) WorkingLeg {
+	return WorkingLeg{
+		ID: LegID(id),
+		Leg: engine.Leg{
+			Side: engine.Long, Kind: engine.OptionKind, OptionType: "call",
+			K: k, P: 8.0, P0: 8.0, Mult: 100.0,
+			Style: "american", Venue: "listed", Underlying: "XYZ", Expiration: "2024-12-20",
+			TimeToExpirationMonths: 3.0,
+		},
+		OpenQty: qty,
+	}
+}
+
+func slicedShortCall(id string, qty float64, k float64) WorkingLeg {
+	return WorkingLeg{
+		ID: LegID(id),
+		Leg: engine.Leg{
+			Side: engine.Short, Kind: engine.OptionKind, OptionType: "call",
+			K: k, P: 3.0, P0: 3.0, Mult: 100.0,
+			Style: "american", Venue: "listed", Underlying: "XYZ", Expiration: "2024-12-20",
+			TimeToExpirationMonths: 3.0,
+		},
+		OpenQty: qty,
+	}
+}
+
+// TestQuantitySlicing_DifferentStrikes (epic test 3): 10 long calls K=100 + 5
+// short calls K=110 slice into one vertical_spread (5+5) + one
+// long_option_short_dated naked sub for the leftover 5 longs. The longs are
+// attributed across two sub-positions, each consuming 5 contracts.
+func TestQuantitySlicing_DifferentStrikes(t *testing.T) {
+	opt := New(loadRulebook(t))
+	facts := defaultFacts()
+	facts.U = 105.0
+	legs := []WorkingLeg{
+		slicedLongCall("L1", 10.0, 100.0),
+		slicedShortCall("S1", 5.0, 110.0),
+	}
+	dec, err := opt.Optimize(facts, legs)
+	if err != nil {
+		t.Fatalf("Optimize: %v", err)
+	}
+	var verticals, nakedLongs int
+	for _, sp := range dec.SubPositions {
+		switch sp.StrategyID {
+		case "vertical_spread":
+			verticals++
+		case "long_option_short_dated":
+			nakedLongs++
+		}
+	}
+	if verticals != 1 || nakedLongs != 1 {
+		t.Fatalf("want 1 vertical + 1 naked-long, got verticals=%d naked=%d (subs=%+v)", verticals, nakedLongs, dec.SubPositions)
+	}
+	attr := dec.Attributions["L1"]
+	if len(attr) != 2 {
+		t.Fatalf("want 2 attribution entries for L1, got %d (%+v)", len(attr), attr)
+	}
+	for _, a := range attr {
+		if a.QtyUsed != 5.0 {
+			t.Fatalf("each L1 attribution should consume 5 contracts, got %g", a.QtyUsed)
+		}
+	}
+}
+
+// TestSameLegClassMatchSplit (epic test 4): two distinct working legs with
+// identical option attributes (same K, exp, side) cannot form a vertical with
+// each other. The v1 optimizer does NOT coalesce same-class legs into a
+// combined naked sub — it emits one naked sub per input leg, totaling the
+// summed contract count.
+func TestSameLegClassMatchSplit(t *testing.T) {
+	opt := New(loadRulebook(t))
+	facts := defaultFacts()
+	legs := []WorkingLeg{
+		slicedLongCall("L1", 10.0, 100.0),
+		slicedLongCall("L2", 5.0, 100.0),
+	}
+	dec, err := opt.Optimize(facts, legs)
+	if err != nil {
+		t.Fatalf("Optimize: %v", err)
+	}
+	var nakedLongs int
+	var totalQty float64
+	for _, sp := range dec.SubPositions {
+		if sp.StrategyID == "vertical_spread" {
+			t.Fatalf("vertical_spread should not appear with two long legs: %+v", sp)
+		}
+		if sp.StrategyID == "long_option_short_dated" {
+			nakedLongs++
+			for _, sa := range sp.Slots {
+				totalQty += sa.QtyUsed
+			}
+		}
+	}
+	if nakedLongs != 2 {
+		t.Fatalf("want exactly 2 naked-long subs (no coalesce), got %d (subs=%+v)", nakedLongs, dec.SubPositions)
+	}
+	if totalQty != 15.0 {
+		t.Fatalf("naked-long total qty = %g, want 15", totalQty)
+	}
+}
+
+// TestExactMatchSplit (epic test 8): two long-call lots (10 + 5 contracts) at
+// the same K=100 plus 5 short calls K=110 produce one vertical (5+5) and
+// naked-long sub-positions totaling 10 contracts on the leftover longs. The
+// vertical can pair with either lot; the optimizer's tiebreak picks one
+// deterministically. We assert the totals, not which lot was paired.
+func TestExactMatchSplit(t *testing.T) {
+	opt := New(loadRulebook(t))
+	facts := defaultFacts()
+	facts.U = 105.0
+	legs := []WorkingLeg{
+		slicedLongCall("L1", 10.0, 100.0),
+		slicedLongCall("L2", 5.0, 100.0),
+		slicedShortCall("S1", 5.0, 110.0),
+	}
+	dec, err := opt.Optimize(facts, legs)
+	if err != nil {
+		t.Fatalf("Optimize: %v", err)
+	}
+	var verticals, nakedLongs int
+	var nakedQty float64
+	for _, sp := range dec.SubPositions {
+		switch sp.StrategyID {
+		case "vertical_spread":
+			verticals++
+		case "long_option_short_dated":
+			nakedLongs++
+			for _, sa := range sp.Slots {
+				nakedQty += sa.QtyUsed
+			}
+		}
+	}
+	if verticals != 1 {
+		t.Fatalf("want exactly 1 vertical_spread, got %d (subs=%+v)", verticals, dec.SubPositions)
+	}
+	if nakedQty != 10.0 {
+		t.Fatalf("naked-long total qty = %g, want 10 (subs=%+v)", nakedQty, dec.SubPositions)
+	}
+	if nakedLongs < 1 {
+		t.Fatalf("want at least 1 naked-long sub, got %d", nakedLongs)
+	}
+}
+
+// sixLegMixedAAPL is the 6-leg AAPL-style fixture from the epic hand-spot-check:
+// a mix of long/short calls and puts that exercises the B&B search over
+// vertical / strangle / box candidates plus residual completion. Reused by
+// both TestPruningInstrumentation (soft runtime budget) and BenchmarkOptimize.
+func sixLegMixedAAPL() []WorkingLeg {
+	mk := func(id string, side engine.Side, opt string, k, p float64) WorkingLeg {
+		return WorkingLeg{
+			ID: LegID(id),
+			Leg: engine.Leg{
+				Side: side, Kind: engine.OptionKind, OptionType: opt,
+				K: k, P: p, P0: p, Mult: 100.0,
+				Style: "american", Venue: "listed", Underlying: "AAPL", Expiration: "2024-12-20",
+				TimeToExpirationMonths: 3.0,
+			},
+			OpenQty: 1.0,
+		}
+	}
+	return []WorkingLeg{
+		mk("LC1", engine.Long, "call", 150.0, 8.0),
+		mk("SC1", engine.Short, "call", 160.0, 3.0),
+		mk("LC2", engine.Long, "call", 170.0, 1.5),
+		mk("LP1", engine.Long, "put", 150.0, 4.0),
+		mk("SP1", engine.Short, "put", 140.0, 2.0),
+		mk("LP2", engine.Long, "put", 130.0, 1.0),
+	}
+}
+
+// TestPruningInstrumentation (epic test 14): the 6-leg AAPL fixture must
+// complete under a soft 100ms wall-clock budget. The NodeCount() is logged
+// for triage; no ratio assertion lands until a tighter pruning bound does.
+// Failure here is a regression signal that B&B blew up — file a follow-up
+// before skipping.
+func TestPruningInstrumentation(t *testing.T) {
+	opt := New(loadRulebook(t))
+	legs := sixLegMixedAAPL()
+	start := time.Now()
+	_, err := opt.Optimize(defaultFacts(), legs)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Logf("Optimize returned residual error (expected for mixed bucket): %v", err)
+	}
+	t.Logf("6-leg Optimize: elapsed=%s nodes=%d", elapsed, opt.NodeCount())
+	if elapsed > 100*time.Millisecond {
+		t.Fatalf("6-leg Optimize exceeded 100ms soft budget: %s (nodes=%d)", elapsed, opt.NodeCount())
+	}
+	if opt.NodeCount() <= 0 {
+		t.Fatalf("NodeCount() should reflect decompose entries, got %d", opt.NodeCount())
+	}
+}
+
+// TestNodeCount_ResetPerOptimize asserts the documented "reset to 0 inside
+// each Optimize call" contract: running Optimize twice does not accumulate
+// the node counter across calls.
+func TestNodeCount_ResetPerOptimize(t *testing.T) {
+	opt := New(loadRulebook(t))
+	legs := sixLegMixedAAPL()
+	_, _ = opt.Optimize(defaultFacts(), legs)
+	first := opt.NodeCount()
+	_, _ = opt.Optimize(defaultFacts(), legs)
+	second := opt.NodeCount()
+	if first != second {
+		t.Fatalf("NodeCount not reset per Optimize: first=%d second=%d", first, second)
+	}
+}
+
+func BenchmarkOptimize(b *testing.B) {
+	rb, err := engine.LoadRulebook(rulesPath)
+	if err != nil {
+		b.Fatalf("LoadRulebook: %v", err)
+	}
+	opt := New(rb)
+	legs := sixLegMixedAAPL()
+	facts := defaultFacts()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = opt.Optimize(facts, legs)
 	}
 }
