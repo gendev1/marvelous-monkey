@@ -1038,3 +1038,250 @@ func TestCollarVsStrangleConflict(t *testing.T) {
 		})
 	}
 }
+
+// -----------------------------------------------------------------------------
+// short_index_call_long_etf — notional ETF coverage with cross-underlying
+// substitution. Bucket facts carry the index spot U; the ETF tracks the index
+// (TracksIndex == sc.Underlying) and the coverage constraint is dollar-based:
+//
+//	le.shares * le.price >= U * sc.qty * sc.mult
+//
+// The recipe consumes ceil(U * n * mult / le.price) shares per n contracts.
+// Leftover ETF shares stay in state with le.price and le.K_equivalent
+// unchanged so subsequent templates / residual completion can re-read them.
+
+func shortIndexCall(id string, qty float64) WorkingLeg {
+	return WorkingLeg{
+		ID: LegID(id),
+		Leg: engine.Leg{
+			Side: engine.Short, Kind: engine.OptionKind, OptionType: "call",
+			K: 4500.0, P: 10.0, P0: 10.0, Mult: 100.0,
+			Style: "european", Underlying: "XYZ_INDEX",
+		},
+		OpenQty: qty,
+	}
+}
+
+func longETF(id string, shares, price, kEq float64) WorkingLeg {
+	return WorkingLeg{
+		ID: LegID(id),
+		Leg: engine.Leg{
+			Side: engine.Long, Kind: engine.ETFKind, Mult: 1.0,
+			Price: price, Shares: shares, KEquivalent: kEq,
+			TracksIndex: "XYZ_INDEX", Leveraged: false,
+		},
+		OpenShares: shares,
+	}
+}
+
+func etfFacts(U float64) BucketFacts {
+	return BucketFacts{
+		U:           U,
+		Class:       "equity",
+		Lev:         1.0,
+		AccountType: engine.MarginAccount,
+		Phase:       engine.Initial,
+	}
+}
+
+// TestPerTemplate_ShortIndexCallLongETF_ExactCoverage (epic test 10): the
+// bucket holds an SPX short call and SPY long shares sized for *exactly* the
+// rule's required notional. The optimizer must pick short_index_call_long_etf
+// with no residual error.
+func TestPerTemplate_ShortIndexCallLongETF_ExactCoverage(t *testing.T) {
+	opt := New(loadRulebook(t))
+	// U=4000, qty=1, mult=100 → required notional = 4000 * 1 * 100 = $400k.
+	// Provide 1000 shares @ $400 → 1000 * 400 = $400k notional.
+	facts := etfFacts(4000.0)
+	legs := []WorkingLeg{
+		shortIndexCall("SC", 1.0),
+		longETF("LE", 1000.0, 400.0, 460.0),
+	}
+	dec, err := opt.Optimize(facts, legs)
+	if err != nil {
+		t.Fatalf("Optimize: %v", err)
+	}
+	if len(dec.SubPositions) != 1 || dec.SubPositions[0].StrategyID != "short_index_call_long_etf" {
+		t.Fatalf("want one short_index_call_long_etf sub, got %+v", dec.SubPositions)
+	}
+	attr := dec.Attributions["LE"]
+	if len(attr) != 1 || attr[0].SharesUsed != 1000.0 {
+		t.Fatalf("LE attribution: want 1000 shares used, got %+v", attr)
+	}
+	if got := dec.Attributions["SC"]; len(got) != 1 || got[0].QtyUsed != 1.0 {
+		t.Fatalf("SC attribution: %+v", got)
+	}
+}
+
+// TestExcessETFWithNotionalCoverage (epic test 7): SPX short call (qty=1,
+// mult=100, U=4000) + SPY long shares 1500 @ $400. Supplied notional ($600k)
+// exceeds required ($400k); 1000 shares are consumed, 500 stay in state and
+// surface as *ErrStockResidualUnsupported. The partial decomposition still
+// contains the short_index_call_long_etf sub.
+func TestExcessETFWithNotionalCoverage(t *testing.T) {
+	opt := New(loadRulebook(t))
+	facts := etfFacts(4000.0)
+	legs := []WorkingLeg{
+		shortIndexCall("SC", 1.0),
+		longETF("LE", 1500.0, 400.0, 460.0),
+	}
+	dec, err := opt.Optimize(facts, legs)
+	var stockErr *ErrStockResidualUnsupported
+	if !errors.As(err, &stockErr) {
+		t.Fatalf("want *ErrStockResidualUnsupported, got %T %v", err, err)
+	}
+	if stockErr.LegID != "LE" || stockErr.OpenShares != 500.0 {
+		t.Fatalf("residual err fields: %+v", stockErr)
+	}
+	if len(dec.SubPositions) != 1 || dec.SubPositions[0].StrategyID != "short_index_call_long_etf" {
+		t.Fatalf("want short_index_call_long_etf in partial decomposition, got %+v", dec.SubPositions)
+	}
+	attr := dec.Attributions["LE"]
+	if len(attr) != 1 || attr[0].SharesUsed != 1000.0 {
+		t.Fatalf("LE attribution: want 1000 shares used, got %+v", attr)
+	}
+}
+
+// TestETFCoverage_InsufficientNotional: ETF supplies $40k against required
+// $400k → consumption returns ok=false, no template fits. B&B falls back to
+// residual completion: the ETF leg is unsupported (stock residual) and the
+// SPX short call lands wherever the naked-rule sequence routes it. Both an
+// ErrStockResidualUnsupported and an ErrNoNakedRule outcome are documented
+// possibilities; we only assert that the optimizer surfaces *some* residual
+// error and never silently absorbs the ETF.
+func TestETFCoverage_InsufficientNotional(t *testing.T) {
+	opt := New(loadRulebook(t))
+	facts := etfFacts(4000.0)
+	legs := []WorkingLeg{
+		shortIndexCall("SC", 1.0),
+		longETF("LE", 100.0, 400.0, 460.0),
+	}
+	dec, err := opt.Optimize(facts, legs)
+	if err == nil {
+		t.Fatalf("want residual error (ETF can't cover), got nil; subs=%+v", dec.SubPositions)
+	}
+	var noNaked *ErrNoNakedRule
+	var stockErr *ErrStockResidualUnsupported
+	if !errors.As(err, &noNaked) && !errors.As(err, &stockErr) {
+		t.Fatalf("want *ErrNoNakedRule or *ErrStockResidualUnsupported, got %T %v", err, err)
+	}
+	// No short_index_call_long_etf sub may exist — the consumption guard
+	// rejected the branch, so the template never reached EvaluateRule.
+	for _, sp := range dec.SubPositions {
+		if sp.StrategyID == "short_index_call_long_etf" {
+			t.Fatalf("unexpected coverage sub on insufficient notional: %+v", sp)
+		}
+	}
+}
+
+// TestETFCoverage_FractionalShareLeftover: ETF supplies 1000 + 5e-10 shares
+// (a float-drift sliver above exact coverage). After consuming 1000 shares
+// the remainder falls below stateKeyEps and is dropped by applyConsumption —
+// no residual error surfaces. Documenting the OpenShares boundary here
+// pins the 1e-9 epsilon convention.
+func TestETFCoverage_FractionalShareLeftover(t *testing.T) {
+	opt := New(loadRulebook(t))
+	facts := etfFacts(4000.0)
+	// 1000 + 5e-10 shares: remainder 5e-10 < stateKeyEps (1e-9) → dropped.
+	legs := []WorkingLeg{
+		shortIndexCall("SC", 1.0),
+		longETF("LE", 1000.0+5e-10, 400.0, 460.0),
+	}
+	dec, err := opt.Optimize(facts, legs)
+	if err != nil {
+		t.Fatalf("Optimize: %v (sub-eps residual should be dropped, not errored)", err)
+	}
+	if len(dec.SubPositions) != 1 || dec.SubPositions[0].StrategyID != "short_index_call_long_etf" {
+		t.Fatalf("want one short_index_call_long_etf sub, got %+v", dec.SubPositions)
+	}
+}
+
+// TestETFCoverage_PartialContractsConsumed: 5 short index calls but ETF
+// notional covers only 2 contracts. The coverage sub consumes 2 contracts +
+// the matching share slice; the remaining 3 sc contracts fall to residual
+// completion and score as short_call_uncovered.
+func TestETFCoverage_PartialContractsConsumed(t *testing.T) {
+	opt := New(loadRulebook(t))
+	facts := etfFacts(4000.0)
+	// 2000 shares @ $400 = $800k notional → covers 800000 / (4000 * 100) = 2 contracts.
+	legs := []WorkingLeg{
+		shortIndexCall("SC", 5.0),
+		longETF("LE", 2000.0, 400.0, 460.0),
+	}
+	dec, err := opt.Optimize(facts, legs)
+	if err != nil {
+		t.Fatalf("Optimize: %v", err)
+	}
+	var coverage, naked int
+	var coverageSC, nakedSC float64
+	for _, sp := range dec.SubPositions {
+		switch sp.StrategyID {
+		case "short_index_call_long_etf":
+			coverage++
+			for _, sa := range sp.Slots {
+				if sa.Slot == "sc" {
+					coverageSC = sa.QtyUsed
+				}
+			}
+		case "short_call_uncovered":
+			naked++
+			for _, sa := range sp.Slots {
+				if sa.LegID == "SC" {
+					nakedSC = sa.QtyUsed
+				}
+			}
+		}
+	}
+	if coverage != 1 || naked != 1 {
+		t.Fatalf("want 1 coverage + 1 naked, got coverage=%d naked=%d (subs=%+v)", coverage, naked, dec.SubPositions)
+	}
+	if coverageSC != 2.0 {
+		t.Fatalf("coverage consumed sc qty = %g, want 2", coverageSC)
+	}
+	if nakedSC != 3.0 {
+		t.Fatalf("naked consumed sc qty = %g, want 3", nakedSC)
+	}
+}
+
+// TestETFCoverage_ZeroPriceIsHardError: a working ETF leg with le.price == 0
+// is a programmer error — the consumption recipe would divide by zero and
+// produce a meaningless share count. consumptionFor must surface a hard
+// error so the bug is loud (rather than silently skipping the template).
+func TestETFCoverage_ZeroPriceIsHardError(t *testing.T) {
+	opt := New(loadRulebook(t))
+	facts := etfFacts(4000.0)
+	bad := longETF("LE", 1000.0, 400.0, 460.0)
+	bad.Leg.Price = 0
+	legs := []WorkingLeg{shortIndexCall("SC", 1.0), bad}
+	_, err := opt.Optimize(facts, legs)
+	if err == nil {
+		t.Fatal("want hard error for le.price == 0, got nil")
+	}
+	var noNaked *ErrNoNakedRule
+	var stockErr *ErrStockResidualUnsupported
+	if errors.As(err, &noNaked) || errors.As(err, &stockErr) {
+		t.Fatalf("zero-price should not surface as a residual sentinel, got %T %v", err, err)
+	}
+}
+
+// TestETFCoverage_ZeroUIsHardError: facts.U == 0 makes the notional
+// denominator vanish. consumptionFor must surface a hard error rather than
+// silently divide by zero. The check fires before any successful template
+// match, so the engine never sees the malformed state.
+func TestETFCoverage_ZeroUIsHardError(t *testing.T) {
+	opt := New(loadRulebook(t))
+	facts := etfFacts(0.0)
+	legs := []WorkingLeg{
+		shortIndexCall("SC", 1.0),
+		longETF("LE", 1000.0, 400.0, 460.0),
+	}
+	_, err := opt.Optimize(facts, legs)
+	if err == nil {
+		t.Fatal("want hard error for U == 0, got nil")
+	}
+	var noNaked *ErrNoNakedRule
+	var stockErr *ErrStockResidualUnsupported
+	if errors.As(err, &noNaked) || errors.As(err, &stockErr) {
+		t.Fatalf("zero-U should not surface as a residual sentinel, got %T %v", err, err)
+	}
+}

@@ -1,6 +1,7 @@
 package optimizer
 
 import (
+	"fmt"
 	"math"
 
 	"margincalc/internal/engine"
@@ -31,6 +32,14 @@ type ConsumptionPlan struct {
 //
 //revive:disable-next-line:var-naming helper named per the issue spec
 func floor_eps(x float64) float64 { return math.Floor(x + consumptionEps) }
+
+// ceil_eps is the ceiling counterpart to floor_eps. Used by ETF notional
+// coverage to convert a contract count back into the share count required to
+// satisfy the rule's notional constraint — and to absorb the same float drift
+// near an integer that floor_eps does on the way down.
+//
+//revive:disable-next-line:var-naming helper named per the issue spec
+func ceil_eps(x float64) float64 { return math.Ceil(x - consumptionEps) }
 
 // optionOnlyConsumption is the deliverable-units recipe for an all-option
 // strategy. Given the assignment and the list of relevant slot names, it
@@ -105,9 +114,10 @@ func optionOnlyConsumption(assignment map[string]WorkingLeg, slots []string) (Co
 // consumptionFor dispatches by rule ID to the appropriate consumption recipe.
 // Option-only families slice quantity by deliverable units; stock-coverage
 // families consume only the coverage portion of shares (n * mult) and leave
-// the residual stock in state. ETF-coverage rules remain ok=false until the
-// notional-coverage recipe lands.
-func consumptionFor(ruleID string, assignment map[string]WorkingLeg, _ BucketFacts) (ConsumptionPlan, bool, error) {
+// the residual stock in state. ETF-coverage uses notional math: the dollar
+// value of the ETF position must cover U * sc.qty * sc.mult, with the share
+// slice rounded up to honor the rule's constraint.
+func consumptionFor(ruleID string, assignment map[string]WorkingLeg, facts BucketFacts) (ConsumptionPlan, bool, error) {
 	switch ruleID {
 	case "vertical_spread":
 		plan, ok := optionOnlyConsumption(assignment, []string{"long_leg", "short_leg"})
@@ -139,6 +149,8 @@ func consumptionFor(ruleID string, assignment map[string]WorkingLeg, _ BucketFac
 	case "reverse_conversion":
 		plan, ok := dualOptionStockConsumption(assignment, "lc", "sp", "ss")
 		return plan, ok, nil
+	case "short_index_call_long_etf":
+		return etfNotionalConsumption(assignment, facts.U)
 	default:
 		return ConsumptionPlan{}, false, nil
 	}
@@ -172,6 +184,63 @@ func singleOptionStockConsumption(assignment map[string]WorkingLeg, optSlot, sto
 		optSlot:   {Qty: n},
 		stockSlot: {Shares: n * opt.Leg.Mult},
 	}}, true
+}
+
+// etfNotionalConsumption is the deliverable-units recipe for the
+// short_index_call_long_etf template. Unlike stock coverage (1:1 by shares),
+// ETF coverage is notional: the rule's constraint
+// `le.shares * le.price >= U * sc.qty * sc.mult` ties together the index
+// underlying U and the per-share ETF price. The recipe:
+//
+//	n_contracts = floor_eps(min(sc.OpenQty, le.OpenShares * le.price / (U * sc.mult)))
+//	shares      = ceil_eps(U * n_contracts * sc.mult / le.price)
+//
+// The ceil on `shares` honors the rule's `>=` constraint at the boundary —
+// without it, an exact division like 4000*1*100/400 == 1000 round-trips
+// cleanly, but any float drift on the divisor would round down and leave the
+// constraint violated by an ULP.
+//
+// Cross-underlying substitution (`le.tracks_index == sc.underlying`) is not
+// re-checked here — it is the rule's bind constraint and EvaluateRule enforces
+// it on the sliced sub-position. The caller is responsible for bucketing legs
+// by their TracksIndex relationship before invoking Optimize.
+//
+// `le.price` and `le.K_equivalent` are per-share and carry through unchanged
+// from the working leg, so the sliced ETF leg still produces the correct
+// `0.50 * price * shares` initial margin and `0.25 * min(price, K_equivalent) * shares`
+// maintenance margin against the smaller `shares` count.
+//
+// Returns ok=false (no error) when no whole contract can be covered by the
+// supplied notional — the optimizer cleanly skips this branch and tries other
+// templates / residual completion. Returns a hard error for `le.price <= 0`
+// or `U <= 0`: these are programmer errors that would silently divide by zero
+// and produce a meaningless plan, and the loud-failure mode matches the
+// rulebook's fail-fast posture on missing primitives.
+func etfNotionalConsumption(assignment map[string]WorkingLeg, U float64) (ConsumptionPlan, bool, error) {
+	sc, ok := assignment["sc"]
+	if !ok || sc.Leg.Kind != engine.OptionKind || !(sc.Leg.Mult > 0) || !(sc.OpenQty > 0) {
+		return ConsumptionPlan{}, false, nil
+	}
+	le, ok := assignment["le"]
+	if !ok || le.Leg.Kind != engine.ETFKind || !(le.OpenShares > 0) {
+		return ConsumptionPlan{}, false, nil
+	}
+	if !(le.Leg.Price > 0) {
+		return ConsumptionPlan{}, false, fmt.Errorf("optimizer: short_index_call_long_etf needs le.price > 0, got %g (leg %q)", le.Leg.Price, string(le.ID))
+	}
+	if !(U > 0) {
+		return ConsumptionPlan{}, false, fmt.Errorf("optimizer: short_index_call_long_etf needs U > 0, got %g", U)
+	}
+	maxByNotional := floor_eps(le.OpenShares * le.Leg.Price / (U * sc.Leg.Mult))
+	n := math.Min(sc.OpenQty, maxByNotional)
+	if n < 1-consumptionEps {
+		return ConsumptionPlan{}, false, nil
+	}
+	shares := ceil_eps(U * n * sc.Leg.Mult / le.Leg.Price)
+	return ConsumptionPlan{Slots: map[string]ConsumedAmount{
+		"sc": {Qty: n},
+		"le": {Shares: shares},
+	}}, true, nil
 }
 
 // dualOptionStockConsumption handles the 2-option + 1-stock shape (collar,
