@@ -36,6 +36,8 @@ margincalc/
 │   │   ├── market_value.go    leg → LMV/SMV bucket accumulation
 │   │   ├── aggregate.go       Aggregate + AggregateWithRulebook
 │   │   └── account_test.go    aggregation / rollup / zero-equity tests
+│   ├── optimizer/             package optimizer (Layer 0.5 spread decomposition)
+│   │   └── optimizer.go       Optimize: arbitrary legs → recognized strategies
 │   └── recon/                 package recon (CSV diff vs vendor)
 │       ├── recon.go
 │       ├── recon_test.go
