@@ -134,6 +134,12 @@ func New(rb *engine.Rulebook) *Optimizer {
 // error. A leg with both OpenQty and OpenShares > 0 violates the input
 // invariant and returns a programmer-error err.
 func (o *Optimizer) Optimize(facts BucketFacts, legs []WorkingLeg) (Decomposition, error) {
+	// Defensive: a nil Optimizer or a New(nil) construction would otherwise
+	// panic deep inside residualOptionRule when the rulebook is dereferenced.
+	// Surface a clear error at the entry point instead.
+	if o == nil || o.rb == nil {
+		return Decomposition{}, fmt.Errorf("optimizer: nil Optimizer or rulebook (constructed with New(nil)?)")
+	}
 	// Validate the input invariant up-front so the early return on a violation
 	// doesn't leave Decomposition partially populated (no Attributions, no
 	// TotalRequirement) — an inconsistent state would defeat the

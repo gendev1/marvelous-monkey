@@ -338,6 +338,16 @@ func TestOptimize_OpenQtyAndOpenSharesIsProgrammerError(t *testing.T) {
 	}
 }
 
+func TestOptimize_NilGuard(t *testing.T) {
+	var nilOpt *Optimizer
+	if _, err := nilOpt.Optimize(defaultFacts(), nil); err == nil {
+		t.Fatal("nil Optimizer: want error, got nil")
+	}
+	if _, err := New(nil).Optimize(defaultFacts(), nil); err == nil {
+		t.Fatal("New(nil): want error, got nil")
+	}
+}
+
 func TestOptimize_EmptyLegs(t *testing.T) {
 	opt := New(loadRulebook(t))
 	dec, err := opt.Optimize(defaultFacts(), nil)
