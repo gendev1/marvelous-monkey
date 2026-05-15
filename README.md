@@ -36,6 +36,8 @@ margincalc/
 │   │   ├── market_value.go    leg → LMV/SMV bucket accumulation
 │   │   ├── aggregate.go       Aggregate + AggregateWithRulebook
 │   │   └── account_test.go    aggregation / rollup / zero-equity tests
+│   ├── optimizer/             package optimizer (Layer 0.5 spread decomposition)
+│   │   └── optimizer.go       Optimize: arbitrary legs → recognized strategies
 │   └── recon/                 package recon (CSV diff vs vendor)
 │       ├── recon.go
 │       ├── recon_test.go
@@ -53,7 +55,7 @@ Everything under `internal/` is module-private — Go won't let any package outs
 
 ## The engine
 
-Position-level, single-strategy. Takes a `Position`, returns a `Result` with three numbers per the manual's distinction:
+Position-level, single-strategy. Takes a `Position` (a pre-classified strategy — one rule's worth of legs) and returns a `Result` with three numbers per the manual's distinction. For arbitrary multi-leg portfolios that haven't been pre-classified, see `internal/optimizer/`, which decomposes them into recognized strategies before evaluation.
 
 | Field | Meaning |
 |---|---|

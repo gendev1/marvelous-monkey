@@ -1,6 +1,6 @@
 # margincalc · status
 
-**main** `54c02e5` · updated 2026-05-13
+**main** `54c02e5` · updated 2026-05-14
 
 Strategy-based RegT engine. Three-layer architecture. Vendor-free.
 
@@ -8,7 +8,7 @@ Strategy-based RegT engine. Three-layer architecture. Vendor-free.
 
 | Tests | Cboe examples | Rules | Layers | Active | Backlog |
 |------:|--------------:|------:|-------:|-------:|--------:|
-| 273   | 22            | 20    | 3 (+L0.5 designed) | 0 | 8 |
+| 273   | 22            | 20    | 4 (+L0.5 shipped) | 0 | 8 |
 
 ## Three layers
 
@@ -63,6 +63,7 @@ _None — Layer 3 overlay MVP landed; next sequenced work is in the backlog belo
 
 | #  | Item                                                                                                                                                                                                            | Layer   | Status |
 |---:|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|--------|
+| 13 | **Layer 0.5 — spread optimizer** — Branch-and-bound decomposition of arbitrary multi-leg portfolios into recognized strategies, with per-leg attribution. **Shipped.** See `internal/optimizer/`. Gating capability for margincalc-as-a-product. | Layer 0.5 | shipped |
 | 12 | **Cross-layer review pass** — Closed `compile()` write-during-`Evaluate` race (all CEL programs pre-compiled in `LoadRulebook`; eval-time `lookupProg` panics on miss); `requireExpirationSlots` now actually compares dates; strict YAML decode with `KnownFields(true)`; `AdjustedBalance` adds back `SMVStock`; recon row-numbers preserved through blank-line skips; required-float guard on `qty`/`mult`; overlay `validScopes` truthful; group-scope `on_missing_reference: error` honored; missing `requires` blocks on four uncovered rules; gofmt CI gate. | Cross-layer | done   |
 | 07 | **House / broker overlay MVP** — `internal/overlay` package ships `HouseRequirement` from `AccountSnapshot` + reference data, with low-price floors, single-name concentration, component-level audit trail, and an `EvaluateHouse` Layer 1→2→3 wrapper. Example overlay at `rules/house_overlay.example.yaml`. See `docs/epics/layer3-house-overlay-plan.md`. | Layer 3 | done   |
 | 03 | **`Aggregate(account, evals) → AccountSnapshot`** — `Aggregate` + `AggregateWithRulebook` shipped in `internal/account/`. Sterling-named LMV/SMV/equity/adjusted-balance fields; `DepositRequirements` rollup by kind. | Layer 2 | done   |
@@ -78,7 +79,6 @@ _None — Layer 3 overlay MVP landed; next sequenced work is in the backlog belo
 | 07A | **Deferred rich overlay dimensions** — Volatility buckets, market-cap, ADV / liquidity, sector concentration, HTB, exposure fees. Requires stable vendor/reference data evidence.                    | Layer 3  | later  |
 | 08 | **Risk-shock engine ("poor-man's PM")** — Delta-based ±20% / ±50%, ±3σ, single-name 50%, worst-case + 5% liquidity haircut. TIMS-shaped number without a vol surface.                                | Layer 1+ | later  |
 | 09 | **Universal Spread Rule** — Cross-position 2-leg pair-up; sum requirements per Sterling. Prereq for portfolio-level RegT.                                                                          | Layer 1  | later  |
-| 13 | **Layer 0.5 — spread optimizer** — Branch-and-bound decomposition of arbitrary multi-leg portfolios into recognized strategies, with per-leg attribution. **Designed, not built.** See `docs/architecture/spread-optimizer.md`. Gating capability for margincalc-as-a-product. | Layer 0.5 | designed |
 | 11 | **Multi-regime margin router** — Add `internal/margin` normalized account result types and `internal/regime` selector/orchestrator so Reg T, house overlay, and future TIMS/SPAN/shock engines share one account-level contract. See `docs/epics/multi-regime-margin-plan.md`. | Cross-layer | later |
 
 ## Deferred · explicitly parked
@@ -99,8 +99,8 @@ _None — Layer 3 overlay MVP landed; next sequenced work is in the backlog belo
 
 ## Sequencing
 
-Engine correctness (#01), the Layer 2 aggregator (#03), the Layer 3 house-overlay MVP (#07), and the cross-layer review-fix pass (#12) are done — `internal/overlay` ships `HouseRequirement`, reference data, low-price floors, single-name concentration, and component attribution with an audit trail; the engine's concurrent-`Evaluate` invariant is now actually enforced. Remaining Layer 3 work is symbol/account/group percentage overrides and house-overlay reconciliation. The gating capability for margincalc-as-a-product is **Layer 0.5 — the spread optimizer (#13)**, which lets callers submit arbitrary leg portfolios instead of pre-classified strategies; design is in `docs/architecture/spread-optimizer.md`, implementation not yet started. The multi-regime router (#11) lands alongside or after L0.5 so Reg T, house overlay, and future engines share one account-level result contract. Account-level reconciliation (#04) stays parked until a vendor API contract exists. Recon hardening (#02) gets revisited when nightly vendor runs are actually on the table.
+Engine correctness (#01), the Layer 2 aggregator (#03), the Layer 3 house-overlay MVP (#07), and the cross-layer review-fix pass (#12) are done — `internal/overlay` ships `HouseRequirement`, reference data, low-price floors, single-name concentration, and component attribution with an audit trail; the engine's concurrent-`Evaluate` invariant is now actually enforced. Remaining Layer 3 work is symbol/account/group percentage overrides and house-overlay reconciliation. The gating capability for margincalc-as-a-product — **Layer 0.5, the spread optimizer (#13)** — is shipped: `internal/optimizer.Optimize` branch-and-bounds arbitrary leg portfolios into recognized strategies with per-leg attribution, so callers no longer have to pre-classify. The multi-regime router (#11) lands alongside or after L0.5 so Reg T, house overlay, and future engines share one account-level result contract. Account-level reconciliation (#04) stays parked until a vendor API contract exists. Recon hardening (#02) gets revisited when nightly vendor runs are actually on the table.
 
 ---
 
-*Generated 2026-05-13 · main @ `54c02e5` · living doc — edit freely as the project advances.*
+*Generated 2026-05-14 · main @ `54c02e5` · living doc — edit freely as the project advances.*
