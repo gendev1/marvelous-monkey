@@ -1133,12 +1133,44 @@ func TestExcessETFWithNotionalCoverage(t *testing.T) {
 	if stockErr.LegID != "LE" || stockErr.OpenShares != 500.0 {
 		t.Fatalf("residual err fields: %+v", stockErr)
 	}
+	// The leftover ETF metadata must round-trip through the error so callers
+	// rendering diagnostics (or re-bucketing the residual) see the same
+	// per-share price and strike-equivalent as the original working leg.
+	if stockErr.Leg.Price != 400.0 || stockErr.Leg.KEquivalent != 460.0 {
+		t.Fatalf("residual ETF metadata: want price=400 K_equivalent=460, got price=%g K_equivalent=%g",
+			stockErr.Leg.Price, stockErr.Leg.KEquivalent)
+	}
+	if stockErr.Leg.TracksIndex != "XYZ_INDEX" {
+		t.Fatalf("residual ETF TracksIndex: want XYZ_INDEX, got %q", stockErr.Leg.TracksIndex)
+	}
 	if len(dec.SubPositions) != 1 || dec.SubPositions[0].StrategyID != "short_index_call_long_etf" {
 		t.Fatalf("want short_index_call_long_etf in partial decomposition, got %+v", dec.SubPositions)
 	}
 	attr := dec.Attributions["LE"]
 	if len(attr) != 1 || attr[0].SharesUsed != 1000.0 {
 		t.Fatalf("LE attribution: want 1000 shares used, got %+v", attr)
+	}
+}
+
+// TestETFCoverage_TracksIndexMismatchSkipsTemplate: the rule's bind
+// constraint requires `le.tracks_index == sc.underlying`. When the ETF
+// tracks a different index, EvaluateRule must decline the template; the
+// optimizer falls back to residual completion. Locks against an accidental
+// optimizer shortcut that would substitute by kind alone and ignore the
+// cross-underlying relationship.
+func TestETFCoverage_TracksIndexMismatchSkipsTemplate(t *testing.T) {
+	opt := New(loadRulebook(t))
+	facts := etfFacts(4000.0)
+	le := longETF("LE", 1000.0, 400.0, 460.0)
+	le.Leg.TracksIndex = "OTHER_INDEX"
+	dec, err := opt.Optimize(facts, []WorkingLeg{shortIndexCall("SC", 1.0), le})
+	if err == nil {
+		t.Fatalf("want residual error on TracksIndex mismatch, got nil; subs=%+v", dec.SubPositions)
+	}
+	for _, sp := range dec.SubPositions {
+		if sp.StrategyID == "short_index_call_long_etf" {
+			t.Fatalf("unexpected short_index_call_long_etf on TracksIndex mismatch: %+v", sp)
+		}
 	}
 }
 
