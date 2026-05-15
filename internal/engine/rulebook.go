@@ -178,6 +178,11 @@ type Rulebook struct {
 	rules     []Rule
 	env       *cel.Env
 	progs     map[string]cel.Program // cache: rule_id + "/" + key → compiled Program
+	// optimizerTargets is the sorted list of rule IDs for which
+	// ruleIsDefaultOptimizerTarget(r) is true. Computed once at LoadRulebook
+	// time so OptimizerTargets() is a constant-time cache hit and stays
+	// concurrent-safe alongside the rest of Rulebook.
+	optimizerTargets []string
 }
 
 func LoadRulebook(path string) (*Rulebook, error) {
@@ -261,6 +266,16 @@ func LoadRulebook(path string) (*Rulebook, error) {
 			}
 		}
 	}
+	// Cache the optimizer target set: the rulebook is immutable post-load,
+	// so OptimizerTargets() can be a sorted-slice copy without recomputing.
+	var targets []string
+	for _, r := range rb.rules {
+		if ruleIsDefaultOptimizerTarget(r) {
+			targets = append(targets, r.ID)
+		}
+	}
+	sort.Strings(targets)
+	rb.optimizerTargets = targets
 	return rb, nil
 }
 
@@ -1174,6 +1189,198 @@ func (rb *Rulebook) evaluateOne(pos Position, rule Rule, accountType AccountType
 	}
 	activation := rb.buildActivation(pos, bound)
 	if err := rb.checkRequires(rule, bound, activation); err != nil {
+		return Result{}, false, err
+	}
+	res, err := rb.evalFormulas(pos, rule, bound, accountType, phase)
+	if err != nil {
+		return Result{}, false, err
+	}
+	return res, true, nil
+}
+
+// RuleByID returns the rule with the given ID and whether it was found. The
+// returned Rule is a deep copy of the loaded entry — every nested slice, map,
+// and pointer is freshly allocated so a caller mutating the result cannot
+// race with concurrent Match/Evaluate readers of rb.rules.
+func (rb *Rulebook) RuleByID(id string) (Rule, bool) {
+	for _, r := range rb.rules {
+		if r.ID == id {
+			return cloneRule(r), true
+		}
+	}
+	return Rule{}, false
+}
+
+// cloneRule deep-copies a Rule so the returned value shares no mutable state
+// with the original. Every nested slice/map/pointer carried by Rule,
+// MatchSpec, RequireSpec, and RuleFormulas is reallocated. Leaf scalars
+// (strings, ints) are copied by value via the struct copy.
+func cloneRule(r Rule) Rule {
+	out := r
+	out.Match = cloneMatchSpec(r.Match)
+	out.Requires = cloneRequireSpec(r.Requires)
+	out.Formulas = cloneRuleFormulas(r.Formulas)
+	if r.OptimizerTarget != nil {
+		v := *r.OptimizerTarget
+		out.OptimizerTarget = &v
+	}
+	return out
+}
+
+func cloneMatchSpec(m MatchSpec) MatchSpec {
+	out := m
+	if m.Legs != nil {
+		out.Legs = append([]LegSlot(nil), m.Legs...)
+	}
+	if m.Constraints != nil {
+		out.Constraints = append([]string(nil), m.Constraints...)
+	}
+	return out
+}
+
+func cloneRequireSpec(s RequireSpec) RequireSpec {
+	out := s
+	if s.RequiredFields != nil {
+		out.RequiredFields = make(map[string][]string, len(s.RequiredFields))
+		for k, v := range s.RequiredFields {
+			out.RequiredFields[k] = append([]string(nil), v...)
+		}
+	}
+	if s.PositiveFields != nil {
+		out.PositiveFields = make(map[string][]string, len(s.PositiveFields))
+		for k, v := range s.PositiveFields {
+			out.PositiveFields[k] = append([]string(nil), v...)
+		}
+	}
+	if s.ExpirationSlots != nil {
+		out.ExpirationSlots = append([]string(nil), s.ExpirationSlots...)
+	}
+	if s.SameAcrossSlots != nil {
+		out.SameAcrossSlots = make([]SameAcrossSlotsSpec, len(s.SameAcrossSlots))
+		for i, sa := range s.SameAcrossSlots {
+			out.SameAcrossSlots[i] = SameAcrossSlotsSpec{
+				Field: sa.Field,
+				Slots: append([]string(nil), sa.Slots...),
+			}
+		}
+	}
+	if s.SameContractSize != nil {
+		out.SameContractSize = make([][]string, len(s.SameContractSize))
+		for i, g := range s.SameContractSize {
+			out.SameContractSize[i] = append([]string(nil), g...)
+		}
+	}
+	if s.MinFields != nil {
+		out.MinFields = append([]MinFieldSpec(nil), s.MinFields...)
+	}
+	if s.AllSlots != nil {
+		v := *s.AllSlots
+		if s.AllSlots.RequiredFields != nil {
+			v.RequiredFields = append([]string(nil), s.AllSlots.RequiredFields...)
+		}
+		out.AllSlots = &v
+	}
+	return out
+}
+
+func cloneRuleFormulas(f RuleFormulas) RuleFormulas {
+	return RuleFormulas{
+		Cash:   cloneFormulaBlock(f.Cash),
+		Margin: cloneFormulaBlock(f.Margin),
+	}
+}
+
+func cloneFormulaBlock(b FormulaBlock) FormulaBlock {
+	out := b
+	if b.Permitted != nil {
+		v := *b.Permitted
+		out.Permitted = &v
+	}
+	return out
+}
+
+// OptimizerTargets returns the sorted list of rule IDs that the spread
+// optimizer (Layer 0.5) may use as decomposition templates: rules whose
+// ruleIsDefaultOptimizerTarget resolves to true (multi-slot strategy rules,
+// minus YAML-overridden exclusions). Naked single-leg sinks, the
+// generic_limited_risk_combo catch-all, and any rule with
+// `optimizer_target: false` are absent.
+//
+// The slice is cached at LoadRulebook time; callers receive a defensive copy
+// so mutations don't leak into the Rulebook's concurrent-read invariant.
+func (rb *Rulebook) OptimizerTargets() []string {
+	out := make([]string, len(rb.optimizerTargets))
+	copy(out, rb.optimizerTargets)
+	return out
+}
+
+// Match is a thin wrapper around tryMatchAndConstraints for callers that
+// want just the leg binding: the result of slot binding plus the
+// match.constraints expression sieve, before any requires evaluation or
+// formula eval. Returns (nil, false, nil) when the rule does not apply
+// (binding refused or a constraint evaluated cleanly to false), (binding,
+// true, nil) when the rule's match shape and constraints hold, and
+// (nil, false, err) for an unknown rule ID, an invalid position, or a CEL
+// eval failure on a constraint.
+//
+// Unlike EvaluateRule, Match does NOT evaluate the `requires` block: the
+// optimizer pre-screens candidates with Match before paying for full
+// EvaluateRule scoring on the survivors.
+func (rb *Rulebook) Match(pos Position, ruleID string) (map[string]Leg, bool, error) {
+	rule, ok := rb.RuleByID(ruleID)
+	if !ok {
+		return nil, false, fmt.Errorf("unknown rule %q", ruleID)
+	}
+	pos = rb.preparePosition(pos)
+	if err := validatePosition(pos); err != nil {
+		return nil, false, err
+	}
+	return rb.tryMatchAndConstraints(pos, rule)
+}
+
+// EvaluateRule scores `pos` as if exactly `ruleID` were the dispatched rule.
+// It is the optimizer's per-candidate scoring entry point; production code
+// that wants production dispatch semantics should call Evaluate.
+//
+// Returns:
+//   - (res, true, nil)  the rule matched, every constraint and every
+//     `requires` precondition held, and a Result was computed.
+//   - (_, false, nil)   the rule does not apply: bindSlots refused, a
+//     constraint evaluated cleanly to false, OR a `requires` precondition
+//     failed. The requires-failure demotion is intentional and differs from
+//     Evaluate, which would surface a requires failure as an
+//     "invalid position:" error. The optimizer scores many candidates and a
+//     failed precondition on one is not a programming error — it just means
+//     this decomposition isn't viable for this position.
+//   - (_, false, err)   the rule ID was unknown, the position failed
+//     universal validation, a CEL constraint/formula errored at eval, or the
+//     rule lacked a formula for the requested (accountType, phase) pair.
+//     These are hard errors that callers should surface.
+func (rb *Rulebook) EvaluateRule(pos Position, ruleID string, accountType AccountType, phase Phase) (Result, bool, error) {
+	rule, ok := rb.RuleByID(ruleID)
+	if !ok {
+		return Result{}, false, fmt.Errorf("unknown rule %q", ruleID)
+	}
+	pos = rb.preparePosition(pos)
+	if err := validatePosition(pos); err != nil {
+		return Result{}, false, err
+	}
+	bound, ok, err := rb.tryMatchAndConstraints(pos, rule)
+	if err != nil {
+		return Result{}, false, err
+	}
+	if !ok {
+		return Result{}, false, nil
+	}
+	activation := rb.buildActivation(pos, bound)
+	if err := rb.checkRequires(rule, bound, activation); err != nil {
+		// Demote *RequiresError to "rule does not apply" — see godoc. Any
+		// other error (CEL eval failure inside a requires primitive, etc.)
+		// propagates as a hard error.
+		var rerr *RequiresError
+		if errors.As(err, &rerr) {
+			return Result{}, false, nil
+		}
 		return Result{}, false, err
 	}
 	res, err := rb.evalFormulas(pos, rule, bound, accountType, phase)
