@@ -121,10 +121,10 @@ If `go vet ./...` reports an existing unrelated issue, document it in the PR bod
 4. Push the branch.
 5. Open a PR with `Fixes #<N>` in the body.
 6. Report the PR URL.
-7. Run `.claude/skills/start-issue/scripts/watch_pr.sh` from the repo root.
-   It blocks until review comments arrive, then prints them and exits.
-8. Fix every comment, commit, re-push, then loop back to step 7.
-   Repeat until the PR is approved or merged.
+7. Stop after reporting the PR URL.
+
+Do not run blocking PR watcher scripts from inside the implementation session. Review follow-up is
+handled by the operator or a separate continuation session.
 
 Do not amend unrelated commits. Do not force-push unless explicitly asked.
 ```
