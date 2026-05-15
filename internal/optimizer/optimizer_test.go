@@ -21,9 +21,9 @@ func loadRulebook(t *testing.T) *engine.Rulebook {
 
 func defaultFacts() BucketFacts {
 	return BucketFacts{
-		U:           100,
+		U:           100.0,
 		Class:       "equity",
-		Lev:         1,
+		Lev:         1.0,
 		AccountType: engine.MarginAccount,
 		Phase:       engine.Initial,
 	}
@@ -34,17 +34,17 @@ func longCallShortDated() engine.Leg {
 		Side:                   engine.Long,
 		Kind:                   engine.OptionKind,
 		OptionType:             "call",
-		K:                      100,
-		P:                      3,
-		P0:                     3,
-		Mult:                   100,
-		TimeToExpirationMonths: 3,
+		K:                      100.0,
+		P:                      3.0,
+		P0:                     3.0,
+		Mult:                   100.0,
+		TimeToExpirationMonths: 3.0,
 	}
 }
 
 func TestNakedScoring_LongOptionShortDated(t *testing.T) {
 	opt := New(loadRulebook(t))
-	wl := WorkingLeg{ID: "L1", Leg: longCallShortDated(), OpenQty: 1}
+	wl := WorkingLeg{ID: "L1", Leg: longCallShortDated(), OpenQty: 1.0}
 	dec, err := opt.Optimize(defaultFacts(), []WorkingLeg{wl})
 	if err != nil {
 		t.Fatalf("Optimize: %v", err)
@@ -56,7 +56,7 @@ func TestNakedScoring_LongOptionShortDated(t *testing.T) {
 		t.Fatalf("StrategyID: want long_option_short_dated, got %s", got)
 	}
 	attr := dec.Attributions["L1"]
-	if len(attr) != 1 || attr[0].SubIndex != 0 || attr[0].QtyUsed != 1 {
+	if len(attr) != 1 || attr[0].SubIndex != 0 || attr[0].QtyUsed != 1.0 {
 		t.Fatalf("attribution: %+v", attr)
 	}
 }
@@ -67,14 +67,14 @@ func TestNakedScoring_LongOptionLongDatedListed(t *testing.T) {
 		Side:                   engine.Long,
 		Kind:                   engine.OptionKind,
 		OptionType:             "put",
-		K:                      100,
-		P:                      5,
-		P0:                     5,
-		Mult:                   100,
+		K:                      100.0,
+		P:                      5.0,
+		P0:                     5.0,
+		Mult:                   100.0,
 		Venue:                  "listed",
-		TimeToExpirationMonths: 12,
+		TimeToExpirationMonths: 12.0,
 	}
-	wl := WorkingLeg{ID: "L1", Leg: leg, OpenQty: 1}
+	wl := WorkingLeg{ID: "L1", Leg: leg, OpenQty: 1.0}
 	dec, err := opt.Optimize(defaultFacts(), []WorkingLeg{wl})
 	if err != nil {
 		t.Fatalf("Optimize: %v", err)
@@ -90,16 +90,16 @@ func TestNakedScoring_LongOptionLongDatedOTC(t *testing.T) {
 		Side:                   engine.Long,
 		Kind:                   engine.OptionKind,
 		OptionType:             "call",
-		K:                      100,
-		P:                      5,
-		P0:                     5,
-		Mult:                   100,
+		K:                      100.0,
+		P:                      5.0,
+		P0:                     5.0,
+		Mult:                   100.0,
 		Venue:                  "otc",
 		Style:                  "american",
 		BrokerGuaranteed:       true,
-		TimeToExpirationMonths: 12,
+		TimeToExpirationMonths: 12.0,
 	}
-	wl := WorkingLeg{ID: "L1", Leg: leg, OpenQty: 1}
+	wl := WorkingLeg{ID: "L1", Leg: leg, OpenQty: 1.0}
 	dec, err := opt.Optimize(defaultFacts(), []WorkingLeg{wl})
 	if err != nil {
 		t.Fatalf("Optimize: %v", err)
@@ -115,12 +115,12 @@ func TestNakedScoring_ShortCallUncovered(t *testing.T) {
 		Side:       engine.Short,
 		Kind:       engine.OptionKind,
 		OptionType: "call",
-		K:          100,
-		P:          3,
-		P0:         3,
-		Mult:       100,
+		K:          100.0,
+		P:          3.0,
+		P0:         3.0,
+		Mult:       100.0,
 	}
-	wl := WorkingLeg{ID: "L1", Leg: leg, OpenQty: 1}
+	wl := WorkingLeg{ID: "L1", Leg: leg, OpenQty: 1.0}
 	dec, err := opt.Optimize(defaultFacts(), []WorkingLeg{wl})
 	if err != nil {
 		t.Fatalf("Optimize: %v", err)
@@ -136,12 +136,12 @@ func TestNakedScoring_ShortPutUncovered(t *testing.T) {
 		Side:       engine.Short,
 		Kind:       engine.OptionKind,
 		OptionType: "put",
-		K:          100,
-		P:          3,
-		P0:         3,
-		Mult:       100,
+		K:          100.0,
+		P:          3.0,
+		P0:         3.0,
+		Mult:       100.0,
 	}
-	wl := WorkingLeg{ID: "L1", Leg: leg, OpenQty: 1}
+	wl := WorkingLeg{ID: "L1", Leg: leg, OpenQty: 1.0}
 	dec, err := opt.Optimize(defaultFacts(), []WorkingLeg{wl})
 	if err != nil {
 		t.Fatalf("Optimize: %v", err)
@@ -154,15 +154,15 @@ func TestNakedScoring_ShortPutUncovered(t *testing.T) {
 func TestOptimize_Deterministic(t *testing.T) {
 	opt := New(loadRulebook(t))
 	legs := []WorkingLeg{
-		{ID: "A", Leg: longCallShortDated(), OpenQty: 1},
+		{ID: "A", Leg: longCallShortDated(), OpenQty: 1.0},
 		{ID: "B", Leg: engine.Leg{
 			Side: engine.Short, Kind: engine.OptionKind, OptionType: "call",
-			K: 100, P: 3, P0: 3, Mult: 100,
-		}, OpenQty: 2},
+			K: 100.0, P: 3.0, P0: 3.0, Mult: 100.0,
+		}, OpenQty: 2.0},
 		{ID: "C", Leg: engine.Leg{
 			Side: engine.Short, Kind: engine.OptionKind, OptionType: "put",
-			K: 100, P: 3, P0: 3, Mult: 100,
-		}, OpenQty: 3},
+			K: 100.0, P: 3.0, P0: 3.0, Mult: 100.0,
+		}, OpenQty: 3.0},
 	}
 	a, errA := opt.Optimize(defaultFacts(), legs)
 	b, errB := opt.Optimize(defaultFacts(), legs)
@@ -179,16 +179,16 @@ func TestOptimize_StockOnlyResidualError(t *testing.T) {
 	wl := WorkingLeg{
 		ID: "S1",
 		Leg: engine.Leg{
-			Side: engine.Long, Kind: engine.StockKind, Shares: 100, Mult: 1,
+			Side: engine.Long, Kind: engine.StockKind, Shares: 100.0, Mult: 1.0,
 		},
-		OpenShares: 100,
+		OpenShares: 100.0,
 	}
 	dec, err := opt.Optimize(defaultFacts(), []WorkingLeg{wl})
 	var stockErr *ErrStockResidualUnsupported
 	if !errors.As(err, &stockErr) {
 		t.Fatalf("want *ErrStockResidualUnsupported, got %T %v", err, err)
 	}
-	if stockErr.LegID != "S1" || stockErr.OpenShares != 100 {
+	if stockErr.LegID != "S1" || stockErr.OpenShares != 100.0 {
 		t.Fatalf("err fields: %+v", stockErr)
 	}
 	if stockErr.Leg.Kind != engine.StockKind {
@@ -205,14 +205,14 @@ func TestOptimize_NoNakedRule(t *testing.T) {
 		Side:                   engine.Long,
 		Kind:                   engine.OptionKind,
 		OptionType:             "call",
-		K:                      100,
-		P:                      5,
-		P0:                     5,
-		Mult:                   100,
-		TimeToExpirationMonths: 12, // > 9 month threshold
+		K:                      100.0,
+		P:                      5.0,
+		P0:                     5.0,
+		Mult:                   100.0,
+		TimeToExpirationMonths: 12.0, // > 9 month threshold
 		// Venue intentionally empty: neither listed nor otc rule binds.
 	}
-	wl := WorkingLeg{ID: "L1", Leg: leg, OpenQty: 1}
+	wl := WorkingLeg{ID: "L1", Leg: leg, OpenQty: 1.0}
 	dec, err := opt.Optimize(defaultFacts(), []WorkingLeg{wl})
 	var nrErr *ErrNoNakedRule
 	if !errors.As(err, &nrErr) {
@@ -231,17 +231,17 @@ func TestStrongestResidualErrorPriority(t *testing.T) {
 	stock := WorkingLeg{
 		ID: "S1",
 		Leg: engine.Leg{
-			Side: engine.Long, Kind: engine.StockKind, Shares: 100, Mult: 1,
+			Side: engine.Long, Kind: engine.StockKind, Shares: 100.0, Mult: 1.0,
 		},
-		OpenShares: 100,
+		OpenShares: 100.0,
 	}
 	noRule := WorkingLeg{
 		ID: "L1",
 		Leg: engine.Leg{
 			Side: engine.Long, Kind: engine.OptionKind, OptionType: "call",
-			K: 100, P: 5, P0: 5, Mult: 100, TimeToExpirationMonths: 12,
+			K: 100.0, P: 5.0, P0: 5.0, Mult: 100.0, TimeToExpirationMonths: 12.0,
 		},
-		OpenQty: 1,
+		OpenQty: 1.0,
 	}
 	_, err := opt.Optimize(defaultFacts(), []WorkingLeg{stock, noRule})
 	var nr *ErrNoNakedRule
@@ -264,9 +264,9 @@ func TestStrongestResidualErrorPriority_AlphabeticalTieBreak(t *testing.T) {
 			ID: id,
 			Leg: engine.Leg{
 				Side: engine.Long, Kind: engine.OptionKind, OptionType: "call",
-				K: 100, P: 5, P0: 5, Mult: 100, TimeToExpirationMonths: 12,
+				K: 100.0, P: 5.0, P0: 5.0, Mult: 100.0, TimeToExpirationMonths: 12.0,
 			},
-			OpenQty: 1,
+			OpenQty: 1.0,
 		}
 	}
 	for _, order := range [][]WorkingLeg{
@@ -286,14 +286,14 @@ func TestStrongestResidualErrorPriority_AlphabeticalTieBreak(t *testing.T) {
 
 func TestOptimize_PartialOutputOnError(t *testing.T) {
 	opt := New(loadRulebook(t))
-	good := WorkingLeg{ID: "A", Leg: longCallShortDated(), OpenQty: 1}
+	good := WorkingLeg{ID: "A", Leg: longCallShortDated(), OpenQty: 1.0}
 	bad := WorkingLeg{
 		ID: "B",
 		Leg: engine.Leg{
 			Side: engine.Long, Kind: engine.OptionKind, OptionType: "call",
-			K: 100, P: 5, P0: 5, Mult: 100, TimeToExpirationMonths: 12,
+			K: 100.0, P: 5.0, P0: 5.0, Mult: 100.0, TimeToExpirationMonths: 12.0,
 		},
-		OpenQty: 1,
+		OpenQty: 1.0,
 	}
 	dec, err := opt.Optimize(defaultFacts(), []WorkingLeg{good, bad})
 	var nr *ErrNoNakedRule
@@ -317,10 +317,10 @@ func TestOptimize_OpenQtyAndOpenSharesIsProgrammerError(t *testing.T) {
 		ID: "X1",
 		Leg: engine.Leg{
 			Side: engine.Long, Kind: engine.OptionKind, OptionType: "call",
-			K: 100, P: 3, P0: 3, Mult: 100, TimeToExpirationMonths: 3,
+			K: 100.0, P: 3.0, P0: 3.0, Mult: 100.0, TimeToExpirationMonths: 3.0,
 		},
-		OpenQty:    1,
-		OpenShares: 100,
+		OpenQty:    1.0,
+		OpenShares: 100.0,
 	}
 	dec, err := opt.Optimize(defaultFacts(), []WorkingLeg{wl})
 	if err == nil {
