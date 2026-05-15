@@ -240,6 +240,14 @@ func bindSlotsAll(legs []Leg, slots []LegSlot) [][]int {
 	return results
 }
 
+// BindSlotsAll is the exported wrapper around bindSlotsAll for callers outside
+// the engine package (notably the optimizer's enumerateAssignments) that need
+// every valid (slot → leg) assignment for a slot list. See bindSlotsAll's
+// godoc for return shape and edge-case semantics.
+func BindSlotsAll(legs []Leg, slots []LegSlot) [][]int {
+	return bindSlotsAll(legs, slots)
+}
+
 func popcount16(x uint16) int { return bits.OnesCount16(x) }
 
 func slotMatches(s LegSlot, l Leg) bool {
