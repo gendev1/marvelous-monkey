@@ -103,10 +103,10 @@ func optionOnlyConsumption(assignment map[string]WorkingLeg, slots []string) (Co
 }
 
 // consumptionFor dispatches by rule ID to the appropriate consumption recipe.
-// In this PR only the option-only families (vertical, strangle/straddle,
-// long/short box) are wired up; rules that need stock/ETF coverage return
-// ok=false (no error) so the optimizer cleanly skips them until issues 6/7
-// add the corresponding recipes.
+// Option-only families slice quantity by deliverable units; stock-coverage
+// families consume only the coverage portion of shares (n * mult) and leave
+// the residual stock in state. ETF-coverage rules remain ok=false until the
+// notional-coverage recipe lands.
 func consumptionFor(ruleID string, assignment map[string]WorkingLeg, _ BucketFacts) (ConsumptionPlan, bool, error) {
 	switch ruleID {
 	case "vertical_spread":
@@ -118,7 +118,91 @@ func consumptionFor(ruleID string, assignment map[string]WorkingLeg, _ BucketFac
 	case "long_box_spread", "short_box_spread":
 		plan, ok := optionOnlyConsumption(assignment, []string{"bc", "bp", "sp", "sc"})
 		return plan, ok, nil
+	case "covered_call":
+		plan, ok := singleOptionStockConsumption(assignment, "sc", "ls")
+		return plan, ok, nil
+	case "protective_put":
+		plan, ok := singleOptionStockConsumption(assignment, "lp", "ls")
+		return plan, ok, nil
+	case "long_call_short_stock":
+		plan, ok := singleOptionStockConsumption(assignment, "lc", "ss")
+		return plan, ok, nil
+	case "short_put_short_stock":
+		plan, ok := singleOptionStockConsumption(assignment, "sp", "ss")
+		return plan, ok, nil
+	case "collar":
+		plan, ok := dualOptionStockConsumption(assignment, "lp", "sc", "ls")
+		return plan, ok, nil
+	case "conversion":
+		plan, ok := dualOptionStockConsumption(assignment, "lp", "sc", "ls")
+		return plan, ok, nil
+	case "reverse_conversion":
+		plan, ok := dualOptionStockConsumption(assignment, "lc", "sp", "ss")
+		return plan, ok, nil
 	default:
 		return ConsumptionPlan{}, false, nil
 	}
+}
+
+// singleOptionStockConsumption handles the 1-option + 1-stock coverage shape
+// (covered_call, protective_put, long_call_short_stock, short_put_short_stock).
+//
+//	n = min(opt.OpenQty, floor_eps(stock.OpenShares / opt.mult))
+//
+// Consumes n contracts of the option and n*opt.mult shares of stock. The
+// residual stock stays in state for the next branch — only the coverage
+// portion is consumed. Returns ok=false when n < 1 (not enough shares for a
+// single contract's worth of coverage) so the optimizer cleanly skips the
+// branch.
+func singleOptionStockConsumption(assignment map[string]WorkingLeg, optSlot, stockSlot string) (ConsumptionPlan, bool) {
+	opt, ok := assignment[optSlot]
+	if !ok || opt.Leg.Kind != engine.OptionKind || !(opt.Leg.Mult > 0) || !(opt.OpenQty > 0) {
+		return ConsumptionPlan{}, false
+	}
+	stock, ok := assignment[stockSlot]
+	if !ok || stock.Leg.Kind != engine.StockKind || !(stock.OpenShares > 0) {
+		return ConsumptionPlan{}, false
+	}
+	maxByShares := floor_eps(stock.OpenShares / opt.Leg.Mult)
+	n := math.Min(opt.OpenQty, maxByShares)
+	if n < 1-consumptionEps {
+		return ConsumptionPlan{}, false
+	}
+	return ConsumptionPlan{Slots: map[string]ConsumedAmount{
+		optSlot:   {Qty: n},
+		stockSlot: {Shares: n * opt.Leg.Mult},
+	}}, true
+}
+
+// dualOptionStockConsumption handles the 2-option + 1-stock shape (collar,
+// conversion, reverse_conversion). The coverage divisor is the larger of the
+// two option mults — that's the conservative requirement that satisfies
+// both legs at once. Mixed mults (e.g. mini-options) are handled here.
+//
+//	mult = max(optA.mult, optB.mult)
+//	n    = min(optA.OpenQty, optB.OpenQty, floor_eps(stock.OpenShares / mult))
+func dualOptionStockConsumption(assignment map[string]WorkingLeg, optASlot, optBSlot, stockSlot string) (ConsumptionPlan, bool) {
+	optA, ok := assignment[optASlot]
+	if !ok || optA.Leg.Kind != engine.OptionKind || !(optA.Leg.Mult > 0) || !(optA.OpenQty > 0) {
+		return ConsumptionPlan{}, false
+	}
+	optB, ok := assignment[optBSlot]
+	if !ok || optB.Leg.Kind != engine.OptionKind || !(optB.Leg.Mult > 0) || !(optB.OpenQty > 0) {
+		return ConsumptionPlan{}, false
+	}
+	stock, ok := assignment[stockSlot]
+	if !ok || stock.Leg.Kind != engine.StockKind || !(stock.OpenShares > 0) {
+		return ConsumptionPlan{}, false
+	}
+	mult := math.Max(optA.Leg.Mult, optB.Leg.Mult)
+	maxByShares := floor_eps(stock.OpenShares / mult)
+	n := math.Min(math.Min(optA.OpenQty, optB.OpenQty), maxByShares)
+	if n < 1-consumptionEps {
+		return ConsumptionPlan{}, false
+	}
+	return ConsumptionPlan{Slots: map[string]ConsumedAmount{
+		optASlot:  {Qty: n},
+		optBSlot:  {Qty: n},
+		stockSlot: {Shares: n * mult},
+	}}, true
 }

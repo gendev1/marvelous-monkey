@@ -168,6 +168,18 @@ func buildSubPosition(rb *engine.Rulebook, ruleID string, assignment map[string]
 			leg.Qty = c.Qty
 		}
 		if c.Shares > 0 {
+			// Stock-coverage sub-positions consume only the coverage portion
+			// of the leg's shares. Dollar-denominated stock fields (notably
+			// ShortSaleProceeds) must scale proportionally so the rule's
+			// formula sees a consistent (shares, proceeds) pair — sale_price
+			// is per-share and stays as-is. Ratio uses the working leg's
+			// original Leg.Shares, which applyConsumption leaves untouched
+			// across partial-consumption rounds, so the ratio remains
+			// correct even when the same stock leg is sliced multiple times.
+			if leg.Kind == engine.StockKind && wl.Leg.Shares > 0 {
+				ratio := c.Shares / wl.Leg.Shares
+				leg.ShortSaleProceeds = wl.Leg.ShortSaleProceeds * ratio
+			}
 			leg.Shares = c.Shares
 		}
 		legs = append(legs, leg)
@@ -252,20 +264,21 @@ func (o *Optimizer) decompose(s State, facts BucketFacts, memo map[string]Decomp
 			}
 			consumed := applyConsumption(s, assignment, plan)
 			sub := o.decompose(consumed, facts, memo, stats)
-			if sub.IsError() {
-				// A hard error (CEL/configuration) propagates so the
-				// caller hears about the most actionable failure. A soft
-				// residual error from the recursion just means this
-				// particular sub-state had no completion — skip the
-				// branch and let other rules / residual at this level
-				// try to win.
-				if !isResidualSoftErr(sub.err) {
-					return sub
-				}
-				continue
+			if sub.IsError() && !isResidualSoftErr(sub.err) {
+				// Hard error (CEL/configuration) propagates so the caller
+				// hears about the most actionable failure.
+				return sub
 			}
 			combined := combine(o.rb, ruleID, assignment, plan, res, sub)
-			if !haveBest || less(combined, best) {
+			// A soft residual error in the recursion (typically a stock
+			// residual that no further template can absorb) is propagated
+			// up the chain alongside the partial decomposition — the parent
+			// sub-position is still recorded so callers see the most
+			// complete attribution possible.
+			if sub.IsError() {
+				combined.err = sub.err
+			}
+			if !haveBest || isBetterCandidate(combined, best) {
 				best = combined
 				haveBest = true
 			}
@@ -274,18 +287,61 @@ func (o *Optimizer) decompose(s State, facts BucketFacts, memo map[string]Decomp
 
 	residual, rerr := o.scoreAllResidual(s, facts)
 	if rerr == nil {
-		if !haveBest || less(residual, best) {
+		if !haveBest || isBetterCandidate(residual, best) {
 			best = residual
 		}
-	} else if !haveBest {
-		// No B&B branch fit and residual returned an error. Carry the
-		// partial residual decomposition (it may contain successful sub-
-		// scores) so the caller can surface them alongside the error.
-		d := errorDecomposition(rerr, residual)
-		memo[key] = d
-		return d
+	} else {
+		residualCarrier := errorDecomposition(rerr, residual)
+		if !haveBest {
+			// No B&B branch fit and residual returned an error. Carry the
+			// partial residual decomposition (it may contain successful sub-
+			// scores) so the caller can surface them alongside the error.
+			memo[key] = residualCarrier
+			return residualCarrier
+		}
+		// haveBest: if the best B&B branch itself carries a soft residual
+		// error, the residual baseline is also a valid candidate — compare
+		// them so the cheaper partial decomposition wins.
+		if best.IsError() && isBetterCandidate(residualCarrier, best) {
+			best = residualCarrier
+		}
 	}
 
 	memo[key] = best
 	return best
+}
+
+// isBetterCandidate ranks a above b. An error-free decomposition always beats
+// an error-flagged one (a complete, scored decomposition is strictly better
+// than a partial one that leaves residual unsupported). When both candidates
+// carry an error, the one with the smaller unattributed-share count wins —
+// i.e. the partial decomposition that managed to consume more state ranks
+// higher than a baseline that left more state stranded. Final tiebreak is
+// the documented `less` order.
+func isBetterCandidate(a, b Decomposition) bool {
+	aErr := a.IsError()
+	bErr := b.IsError()
+	if aErr != bErr {
+		return !aErr
+	}
+	if aErr {
+		aRem := residualSharesInErr(a.err)
+		bRem := residualSharesInErr(b.err)
+		if aRem != bRem {
+			return aRem < bRem
+		}
+	}
+	return less(a, b)
+}
+
+// residualSharesInErr extracts the unattributed share count from a residual
+// error. ErrStockResidualUnsupported.OpenShares is the canonical signal;
+// other error kinds carry no share count and return 0 (treated as "tied" so
+// `less` decides).
+func residualSharesInErr(err error) float64 {
+	var s *ErrStockResidualUnsupported
+	if errors.As(err, &s) {
+		return s.OpenShares
+	}
+	return 0
 }
