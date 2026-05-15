@@ -121,12 +121,24 @@ func (e *ErrStockResidualUnsupported) Error() string {
 // respect to the rulebook and safe for concurrent use to the same extent
 // engine.Rulebook is.
 type Optimizer struct {
-	rb *engine.Rulebook
+	rb    *engine.Rulebook
+	nodes int
 }
 
 // New constructs an Optimizer bound to a loaded rulebook.
 func New(rb *engine.Rulebook) *Optimizer {
 	return &Optimizer{rb: rb}
+}
+
+// NodeCount returns the number of decompose entries during the most recent
+// Optimize call. Exposed for instrumentation tests (epic test 14) so future
+// pruning work can detect regressions in the search size. Reset to 0 at the
+// top of each Optimize invocation.
+func (o *Optimizer) NodeCount() int {
+	if o == nil {
+		return 0
+	}
+	return o.nodes
 }
 
 // Optimize runs the branch-and-bound decomposition over the working legs:
@@ -173,6 +185,7 @@ func (o *Optimizer) Optimize(facts BucketFacts, legs []WorkingLeg) (Decompositio
 				string(wl.ID), wl.OpenQty, wl.OpenShares)
 		}
 	}
+	o.nodes = 0
 	state := newState(legs)
 	memo := map[string]Decomposition{}
 	result := o.decompose(state, facts, memo, nil)

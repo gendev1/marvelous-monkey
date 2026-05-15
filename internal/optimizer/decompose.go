@@ -226,6 +226,7 @@ type decomposeStats struct {
 // "skip if currentCost + sum > best" prune would be wrong. Documented here
 // so a future tightening doesn't accidentally regress.
 func (o *Optimizer) decompose(s State, facts BucketFacts, memo map[string]Decomposition, stats *decomposeStats) Decomposition {
+	o.nodes++
 	if stats != nil {
 		stats.Calls++
 	}
