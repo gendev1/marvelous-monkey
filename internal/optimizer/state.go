@@ -41,17 +41,19 @@ func roundEps(v float64) float64 {
 	return math.Round(v/stateKeyEps) * stateKeyEps
 }
 
-// Key returns the memoization key for s: "legID:openQty:openShares" entries
-// for every leg, joined by '|'. Quantities are rounded to stateKeyEps before
-// formatting so floating-point drift from repeated subtraction doesn't split
-// what should be the same state across multiple memo entries.
+// Key returns the memoization key for s: <quoted legID>:openQty:openShares
+// entries for every leg, joined by '|'. Quantities are rounded to stateKeyEps
+// before formatting so floating-point drift from repeated subtraction doesn't
+// split what should be the same state across multiple memo entries. LegIDs
+// are quoted with %q so an ID containing ':' or '|' can't collide with the
+// separators and produce a false memo hit.
 func (s State) Key() string {
 	if len(s.Legs) == 0 {
 		return ""
 	}
 	parts := make([]string, len(s.Legs))
 	for i, wl := range s.Legs {
-		parts[i] = fmt.Sprintf("%s:%g:%g", wl.ID, roundEps(wl.OpenQty), roundEps(wl.OpenShares))
+		parts[i] = fmt.Sprintf("%q:%g:%g", string(wl.ID), roundEps(wl.OpenQty), roundEps(wl.OpenShares))
 	}
 	return strings.Join(parts, "|")
 }

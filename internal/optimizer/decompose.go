@@ -62,8 +62,8 @@ func less(a, b Decomposition) bool {
 	if c := strings.Compare(ar, br); c != 0 {
 		return c < 0
 	}
-	al := strings.Join(sortedLegIDs(a), ",")
-	bl := strings.Join(sortedLegIDs(b), ",")
+	al := strings.Join(sortedAssignments(a), "|")
+	bl := strings.Join(sortedAssignments(b), "|")
 	return strings.Compare(al, bl) < 0
 }
 
@@ -76,15 +76,22 @@ func sortedRuleIDs(d Decomposition) []string {
 	return ids
 }
 
-func sortedLegIDs(d Decomposition) []string {
-	var ids []string
+// sortedAssignments serializes each sub-position as "strategyID:slot=legID,..."
+// and returns the lex-sorted list. Preserving the slot→leg mapping (not just
+// the multiset of leg IDs) is what the documented tiebreak chain step 4
+// requires: two decompositions that pick the same legs into different slots
+// can yield different downstream Attributions, so they must not compare equal.
+func sortedAssignments(d Decomposition) []string {
+	out := make([]string, 0, len(d.SubPositions))
 	for _, sp := range d.SubPositions {
-		for _, sa := range sp.Slots {
-			ids = append(ids, string(sa.LegID))
+		slots := make([]string, len(sp.Slots))
+		for i, sa := range sp.Slots {
+			slots[i] = sa.Slot + "=" + string(sa.LegID)
 		}
+		out = append(out, sp.StrategyID+":"+strings.Join(slots, ","))
 	}
-	sort.Strings(ids)
-	return ids
+	sort.Strings(out)
+	return out
 }
 
 // combine prepends the (ruleID, assignment, plan, res) sub-position to the
@@ -269,7 +276,6 @@ func (o *Optimizer) decompose(s State, facts BucketFacts, memo map[string]Decomp
 	if rerr == nil {
 		if !haveBest || less(residual, best) {
 			best = residual
-			haveBest = true
 		}
 	} else if !haveBest {
 		// No B&B branch fit and residual returned an error. Carry the

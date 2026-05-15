@@ -697,8 +697,13 @@ func bruteForceDecompose(t *testing.T, opt *Optimizer, facts BucketFacts, legs [
 				continue
 			}
 			remainder := applyConsumption(state, assignment, plan)
-			subDec, rerr := opt.scoreAllResidual(remainder, facts)
-			if rerr != nil {
+			// Recurse into the remainder so we exhaustively explore
+			// template+template+... chains, not just one template plus a
+			// residual tail. The recursion's own residual baseline at each
+			// level guarantees this terminates with a viable decomposition
+			// whenever one exists.
+			subDec := bruteForceDecompose(t, opt, facts, remainder.Legs)
+			if subDec.IsError() {
 				continue
 			}
 			combined := combine(opt.rb, ruleID, assignment, plan, res, subDec)

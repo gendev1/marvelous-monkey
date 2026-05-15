@@ -25,16 +25,12 @@ type ConsumptionPlan struct {
 	Slots map[string]ConsumedAmount
 }
 
-// floor_eps and ceil_eps are the canonical float-snapping helpers used by
-// the deliverable-units math. The eps absorbs the small additive drift that
+// floor_eps is the canonical float-snapping helper used by the
+// deliverable-units math. The eps absorbs the small additive drift that
 // shows up after a subtraction like (10 - 5) producing 4.999999999... .
 //
-//revive:disable:var-naming exported helpers named per the issue spec
+//revive:disable-next-line:var-naming helper named per the issue spec
 func floor_eps(x float64) float64 { return math.Floor(x + consumptionEps) }
-
-func ceil_eps(x float64) float64 { return math.Ceil(x - consumptionEps) }
-
-//revive:enable:var-naming
 
 // optionOnlyConsumption is the deliverable-units recipe for an all-option
 // strategy. Given the assignment and the list of relevant slot names, it
@@ -73,15 +69,25 @@ func optionOnlyConsumption(assignment map[string]WorkingLeg, slots []string) (Co
 			units = u
 		}
 	}
-	// Snap units down so units / mult_i is a whole number for every slot.
-	// When all mults are equal (the common case) this is the identity step;
-	// when mults differ it picks the largest common multiple <= units.
-	for _, slot := range slots {
-		wl := assignment[slot]
-		contracts := floor_eps(units / wl.Leg.Mult)
-		snapped := contracts * wl.Leg.Mult
-		if snapped < units {
-			units = snapped
+	// Snap units down to a fixed point so units / mult_i is a whole number
+	// for *every* slot. A single pass is not sufficient when multipliers
+	// differ: lowering units to fit slot j can leave it indivisible by an
+	// earlier slot i. We loop until no further snap is needed; with units
+	// strictly decreasing by at least one mult per change, the loop is
+	// O(slots * max(units/min_mult)) in the worst case and trivial for the
+	// uniform-mult case that dominates production.
+	for {
+		changed := false
+		for _, slot := range slots {
+			wl := assignment[slot]
+			snapped := floor_eps(units/wl.Leg.Mult) * wl.Leg.Mult
+			if snapped+consumptionEps < units {
+				units = snapped
+				changed = true
+			}
+		}
+		if !changed {
+			break
 		}
 	}
 	plan := ConsumptionPlan{Slots: make(map[string]ConsumedAmount, len(slots))}
