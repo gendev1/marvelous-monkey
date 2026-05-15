@@ -24,6 +24,7 @@ Read:
 
 ```text
 docs/epics/<slug>/epic.md
+docs/architecture/decisions/<slug>.md   (if it exists — locked decisions from grill-with-docs)
 ```
 
 For every bullet in `## Issues`, write:
@@ -33,6 +34,29 @@ docs/epics/<slug>/<issue-slug>.md
 ```
 
 If issue files already exist, ask whether to overwrite, skip, or abort.
+
+## Feeding locked decisions into issues
+
+If `docs/architecture/decisions/<slug>.md` exists, it is the source of truth for architectural decisions on this epic. Do not re-derive design choices from the epic body — read the decisions doc first and let it shape every issue.
+
+For each child issue:
+
+1. Identify which `D<n>` decisions in the decisions doc are load-bearing for this issue. A decision is load-bearing if the implementation would change shape depending on which alternative was picked.
+2. Reference them explicitly in the issue body under a `## Decisions` section (between `## Context` and `## Files to Touch`):
+
+   ```markdown
+   ## Decisions
+
+   This issue implements:
+   - [D2 — `max` at `scope: group` floors over sum-of-per-position-baselines](../../architecture/decisions/<slug>.md#d2--max-at-scope-group-floors-over-sum-of-per-position-baselines)
+   - [D3 — Instrument-kind classification lives on `SecurityFacts`](../../architecture/decisions/<slug>.md#d3--instrument-kind-classification-lives-on-securityfacts-not-engineleg)
+
+   Do not re-litigate; if you believe a decision needs revisiting, surface it in the PR body and stop.
+   ```
+
+3. Use the decisions to constrain `## Approach` and `## Files to Touch`. If D3 says instrument-kind lives on `SecurityFacts`, the issue's approach must not extend `engine.Leg` with a sub-kind field — even if the user's plain-text plan was ambiguous.
+
+If a child issue would need a decision that isn't yet locked in the decisions doc, **stop and tell the user**. Either run `/grill-with-docs` to lock it, or accept that the issue carries an unresolved question (which usually means it isn't ready to ship).
 
 ## Shared research
 
