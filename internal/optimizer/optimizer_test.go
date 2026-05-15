@@ -1243,6 +1243,42 @@ func TestETFCoverage_PartialContractsConsumed(t *testing.T) {
 	}
 }
 
+// TestETFCoverage_DriftedPriceCapsShares: a price that's just below a clean
+// fixed-point value (399.9999996 instead of 400.0) is the adversarial input
+// that would otherwise have floor_eps round maxByNotional up to 1 contract
+// while ceil_eps rounds the share count to 1001 — one share above
+// OpenShares. The defensive back-off must catch this and either reduce n or
+// reject the branch so applyConsumption never sees a negative leftover.
+func TestETFCoverage_DriftedPriceCapsShares(t *testing.T) {
+	opt := New(loadRulebook(t))
+	facts := etfFacts(4000.0)
+	legs := []WorkingLeg{
+		shortIndexCall("SC", 1.0),
+		longETF("LE", 1000.0, 399.9999996, 460.0),
+	}
+	dec, err := opt.Optimize(facts, legs)
+	// With only 1 contract on offer, the back-off path falls to n=0 and the
+	// template is skipped — the legs route to residual completion. Either
+	// outcome is acceptable as long as no plan ever consumes more shares
+	// than OpenShares.
+	for _, sp := range dec.SubPositions {
+		for _, sa := range sp.Slots {
+			if sa.LegID == "LE" && sa.SharesUsed > 1000.0 {
+				t.Fatalf("planned %g shares against 1000 OpenShares: %+v", sa.SharesUsed, sp)
+			}
+		}
+	}
+	// Residual error is fine; a hard error would indicate the guard
+	// misclassified the drift as a programmer bug.
+	if err != nil {
+		var noNaked *ErrNoNakedRule
+		var stockErr *ErrStockResidualUnsupported
+		if !errors.As(err, &noNaked) && !errors.As(err, &stockErr) {
+			t.Fatalf("want residual error from drifted-price back-off, got %T %v", err, err)
+		}
+	}
+}
+
 // TestETFCoverage_ZeroPriceIsHardError: a working ETF leg with le.price == 0
 // is a programmer error — the consumption recipe would divide by zero and
 // produce a meaningless share count. consumptionFor must surface a hard

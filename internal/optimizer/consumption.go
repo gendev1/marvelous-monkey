@@ -237,6 +237,20 @@ func etfNotionalConsumption(assignment map[string]WorkingLeg, U float64) (Consum
 		return ConsumptionPlan{}, false, nil
 	}
 	shares := ceil_eps(U * n * sc.Leg.Mult / le.Leg.Price)
+	// Defensive: under adversarial float drift (e.g. a non-fixed-point price
+	// like 399.9999996), floor_eps can round maxByNotional up to an integer
+	// whose corresponding ceil_eps share count slightly exceeds OpenShares.
+	// Plan more shares than we have and applyConsumption would silently zero
+	// the leg while the engine sees an inflated leg.Shares. Back off one
+	// contract and recompute — if even one contract no longer fits, the
+	// branch is genuinely infeasible.
+	if shares > le.OpenShares {
+		n -= 1
+		if n < 1-consumptionEps {
+			return ConsumptionPlan{}, false, nil
+		}
+		shares = ceil_eps(U * n * sc.Leg.Mult / le.Leg.Price)
+	}
 	return ConsumptionPlan{Slots: map[string]ConsumedAmount{
 		"sc": {Qty: n},
 		"le": {Shares: shares},
