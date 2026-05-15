@@ -257,6 +257,87 @@ func TestStrongestResidualErrorPriority(t *testing.T) {
 	}
 }
 
+func TestStrongestResidualErrorPriority_AlphabeticalTieBreak(t *testing.T) {
+	opt := New(loadRulebook(t))
+	mkNoRule := func(id LegID) WorkingLeg {
+		return WorkingLeg{
+			ID: id,
+			Leg: engine.Leg{
+				Side: engine.Long, Kind: engine.OptionKind, OptionType: "call",
+				K: 100, P: 5, P0: 5, Mult: 100, TimeToExpirationMonths: 12,
+			},
+			OpenQty: 1,
+		}
+	}
+	for _, order := range [][]WorkingLeg{
+		{mkNoRule("L1"), mkNoRule("L2")},
+		{mkNoRule("L2"), mkNoRule("L1")},
+	} {
+		_, err := opt.Optimize(defaultFacts(), order)
+		var nr *ErrNoNakedRule
+		if !errors.As(err, &nr) {
+			t.Fatalf("want *ErrNoNakedRule, got %T %v", err, err)
+		}
+		if nr.LegID != "L1" {
+			t.Fatalf("alphabetical tie-break: want L1, got %q (input order %v)", nr.LegID, order)
+		}
+	}
+}
+
+func TestOptimize_PartialOutputOnError(t *testing.T) {
+	opt := New(loadRulebook(t))
+	good := WorkingLeg{ID: "A", Leg: longCallShortDated(), OpenQty: 1}
+	bad := WorkingLeg{
+		ID: "B",
+		Leg: engine.Leg{
+			Side: engine.Long, Kind: engine.OptionKind, OptionType: "call",
+			K: 100, P: 5, P0: 5, Mult: 100, TimeToExpirationMonths: 12,
+		},
+		OpenQty: 1,
+	}
+	dec, err := opt.Optimize(defaultFacts(), []WorkingLeg{good, bad})
+	var nr *ErrNoNakedRule
+	if !errors.As(err, &nr) {
+		t.Fatalf("want *ErrNoNakedRule, got %T %v", err, err)
+	}
+	if len(dec.SubPositions) != 1 || dec.SubPositions[0].StrategyID != "long_option_short_dated" {
+		t.Fatalf("partial decomposition missing the successful sub: %+v", dec.SubPositions)
+	}
+	if got := dec.Attributions["A"]; len(got) != 1 {
+		t.Fatalf("partial Attributions for A: %+v", got)
+	}
+	if dec.TotalRequirement <= 0 {
+		t.Fatalf("partial TotalRequirement should reflect successful sub, got %g", dec.TotalRequirement)
+	}
+}
+
+func TestOptimize_OpenQtyAndOpenSharesIsProgrammerError(t *testing.T) {
+	opt := New(loadRulebook(t))
+	wl := WorkingLeg{
+		ID: "X1",
+		Leg: engine.Leg{
+			Side: engine.Long, Kind: engine.OptionKind, OptionType: "call",
+			K: 100, P: 3, P0: 3, Mult: 100, TimeToExpirationMonths: 3,
+		},
+		OpenQty:    1,
+		OpenShares: 100,
+	}
+	dec, err := opt.Optimize(defaultFacts(), []WorkingLeg{wl})
+	if err == nil {
+		t.Fatalf("want programmer error for OpenQty+OpenShares, got nil")
+	}
+	// Not one of the residual sentinel types — it's a generic invariant
+	// violation that callers should treat as a bug.
+	var nr *ErrNoNakedRule
+	var sr *ErrStockResidualUnsupported
+	if errors.As(err, &nr) || errors.As(err, &sr) {
+		t.Fatalf("invariant violation should not be a residual sentinel: %T", err)
+	}
+	if len(dec.SubPositions) != 0 || dec.TotalRequirement != 0 {
+		t.Fatalf("invariant violation must return zero decomposition, got %+v", dec)
+	}
+}
+
 func TestOptimize_EmptyLegs(t *testing.T) {
 	opt := New(loadRulebook(t))
 	dec, err := opt.Optimize(defaultFacts(), nil)

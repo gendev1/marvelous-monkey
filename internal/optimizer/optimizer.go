@@ -134,13 +134,19 @@ func New(rb *engine.Rulebook) *Optimizer {
 // error. A leg with both OpenQty and OpenShares > 0 violates the input
 // invariant and returns a programmer-error err.
 func (o *Optimizer) Optimize(facts BucketFacts, legs []WorkingLeg) (Decomposition, error) {
+	// Validate the input invariant up-front so the early return on a violation
+	// doesn't leave Decomposition partially populated (no Attributions, no
+	// TotalRequirement) — an inconsistent state would defeat the
+	// partial-output contract and confuse callers.
+	for _, wl := range legs {
+		if wl.OpenQty > 0 && wl.OpenShares > 0 {
+			return Decomposition{}, fmt.Errorf("optimizer: leg %q has both OpenQty (%g) and OpenShares (%g) > 0 (invariant violation)",
+				string(wl.ID), wl.OpenQty, wl.OpenShares)
+		}
+	}
 	dec := Decomposition{}
 	var strongest error
 	for _, wl := range legs {
-		if wl.OpenQty > 0 && wl.OpenShares > 0 {
-			return dec, fmt.Errorf("optimizer: leg %q has both OpenQty (%g) and OpenShares (%g) > 0 (invariant violation)",
-				string(wl.ID), wl.OpenQty, wl.OpenShares)
-		}
 		if wl.OpenShares > 0 {
 			candidate := &ErrStockResidualUnsupported{LegID: wl.ID, OpenShares: wl.OpenShares, Leg: wl.Leg}
 			strongest = takeStronger(strongest, candidate)
@@ -184,8 +190,10 @@ func takeStronger(current, candidate error) error {
 //
 // The stronger error wins so the caller hears about the most actionable
 // failure first (a CEL/configuration bug shouldn't be hidden by a downstream
-// "no rule" miss). Within the same kind, ties break alphabetically on the
-// leg ID, which keeps the choice deterministic across runs.
+// "no rule" miss). Within the same kind, ties break by the alphabetically
+// smallest LegID — both directions are deterministic, but smaller-first
+// matches how callers naturally enumerate leg IDs and keeps the chosen
+// diagnostic stable when input order changes.
 //
 // Returns +1 when a is stronger, -1 when b is stronger, 0 when equal.
 func compareResidualErr(a, b error) int {
@@ -197,7 +205,9 @@ func compareResidualErr(a, b error) int {
 		}
 		return -1
 	}
-	return strings.Compare(residualErrLegID(a), residualErrLegID(b))
+	// Smaller LegID is "stronger" within a tie. strings.Compare(b, a) is
+	// positive iff a < b, which is exactly the "a wins" condition.
+	return strings.Compare(residualErrLegID(b), residualErrLegID(a))
 }
 
 func residualErrRank(err error) int {
