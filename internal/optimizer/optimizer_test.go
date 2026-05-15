@@ -715,3 +715,326 @@ func bruteForceDecompose(t *testing.T, opt *Optimizer, facts BucketFacts, legs [
 	}
 	return best
 }
+
+// -----------------------------------------------------------------------------
+// Stock-coverage per-template parity. Each fixture is the minimal-fit pair for
+// one stock-coverage rule; Optimize must pick the rule rather than fall through
+// to residual completion.
+
+func longStock100() WorkingLeg {
+	return WorkingLeg{
+		ID: "LS",
+		Leg: engine.Leg{
+			Side: engine.Long, Kind: engine.StockKind, Shares: 100.0, Mult: 1.0,
+			Underlying: "XYZ",
+		},
+		OpenShares: 100.0,
+	}
+}
+
+func shortStock100() WorkingLeg {
+	return WorkingLeg{
+		ID: "SS",
+		Leg: engine.Leg{
+			Side: engine.Short, Kind: engine.StockKind, Shares: 100.0, Mult: 1.0,
+			Underlying:        "XYZ",
+			ShortSaleProceeds: 10000.0,
+			SalePrice:         100.0,
+		},
+		OpenShares: 100.0,
+	}
+}
+
+func shortCall(id string, k float64) WorkingLeg {
+	return WorkingLeg{
+		ID: LegID(id),
+		Leg: engine.Leg{
+			Side: engine.Short, Kind: engine.OptionKind, OptionType: "call",
+			K: k, P: 3.0, P0: 3.0, Mult: 100.0,
+			Style: "american", Venue: "listed", Underlying: "XYZ", Expiration: "2024-12-20",
+		},
+		OpenQty: 1.0,
+	}
+}
+
+func longPut(id string, k float64) WorkingLeg {
+	return WorkingLeg{
+		ID: LegID(id),
+		Leg: engine.Leg{
+			Side: engine.Long, Kind: engine.OptionKind, OptionType: "put",
+			K: k, P: 4.0, P0: 4.0, Mult: 100.0,
+			Style: "american", Venue: "listed", Underlying: "XYZ", Expiration: "2024-12-20",
+		},
+		OpenQty: 1.0,
+	}
+}
+
+func longCall(id string, k float64) WorkingLeg {
+	return WorkingLeg{
+		ID: LegID(id),
+		Leg: engine.Leg{
+			Side: engine.Long, Kind: engine.OptionKind, OptionType: "call",
+			K: k, P: 4.0, P0: 4.0, Mult: 100.0,
+			Style: "american", Venue: "listed", Underlying: "XYZ", Expiration: "2024-12-20",
+			TimeToExpirationMonths: 3.0,
+		},
+		OpenQty: 1.0,
+	}
+}
+
+func shortPut(id string, k float64) WorkingLeg {
+	return WorkingLeg{
+		ID: LegID(id),
+		Leg: engine.Leg{
+			Side: engine.Short, Kind: engine.OptionKind, OptionType: "put",
+			K: k, P: 3.0, P0: 3.0, Mult: 100.0,
+			Style: "american", Venue: "listed", Underlying: "XYZ", Expiration: "2024-12-20",
+		},
+		OpenQty: 1.0,
+	}
+}
+
+func TestPerTemplate_CoveredCall(t *testing.T) {
+	opt := New(loadRulebook(t))
+	dec, err := opt.Optimize(defaultFacts(), []WorkingLeg{longStock100(), shortCall("SC", 100.0)})
+	if err != nil {
+		t.Fatalf("Optimize: %v", err)
+	}
+	if len(dec.SubPositions) != 1 || dec.SubPositions[0].StrategyID != "covered_call" {
+		t.Fatalf("want one covered_call sub, got %+v", dec.SubPositions)
+	}
+	if got := dec.Attributions["LS"]; len(got) != 1 || got[0].SharesUsed != 100.0 {
+		t.Fatalf("LS attribution: %+v", got)
+	}
+}
+
+func TestPerTemplate_ProtectivePut(t *testing.T) {
+	opt := New(loadRulebook(t))
+	dec, err := opt.Optimize(defaultFacts(), []WorkingLeg{longStock100(), longPut("LP", 100.0)})
+	if err != nil {
+		t.Fatalf("Optimize: %v", err)
+	}
+	if len(dec.SubPositions) != 1 || dec.SubPositions[0].StrategyID != "protective_put" {
+		t.Fatalf("want one protective_put sub, got %+v", dec.SubPositions)
+	}
+}
+
+func TestPerTemplate_Collar(t *testing.T) {
+	opt := New(loadRulebook(t))
+	dec, err := opt.Optimize(defaultFacts(), []WorkingLeg{
+		longStock100(), longPut("LP", 95.0), shortCall("SC", 105.0),
+	})
+	if err != nil {
+		t.Fatalf("Optimize: %v", err)
+	}
+	if len(dec.SubPositions) != 1 || dec.SubPositions[0].StrategyID != "collar" {
+		t.Fatalf("want one collar sub, got %+v", dec.SubPositions)
+	}
+}
+
+func TestPerTemplate_Conversion(t *testing.T) {
+	opt := New(loadRulebook(t))
+	dec, err := opt.Optimize(defaultFacts(), []WorkingLeg{
+		longStock100(), longPut("LP", 100.0), shortCall("SC", 100.0),
+	})
+	if err != nil {
+		t.Fatalf("Optimize: %v", err)
+	}
+	if len(dec.SubPositions) != 1 || dec.SubPositions[0].StrategyID != "conversion" {
+		t.Fatalf("want one conversion sub, got %+v", dec.SubPositions)
+	}
+}
+
+func TestPerTemplate_ReverseConversion(t *testing.T) {
+	opt := New(loadRulebook(t))
+	dec, err := opt.Optimize(defaultFacts(), []WorkingLeg{
+		shortStock100(), longCall("LC", 100.0), shortPut("SP", 100.0),
+	})
+	if err != nil {
+		t.Fatalf("Optimize: %v", err)
+	}
+	if len(dec.SubPositions) != 1 || dec.SubPositions[0].StrategyID != "reverse_conversion" {
+		t.Fatalf("want one reverse_conversion sub, got %+v", dec.SubPositions)
+	}
+}
+
+func TestPerTemplate_LongCallShortStock(t *testing.T) {
+	opt := New(loadRulebook(t))
+	dec, err := opt.Optimize(defaultFacts(), []WorkingLeg{shortStock100(), longCall("LC", 100.0)})
+	if err != nil {
+		t.Fatalf("Optimize: %v", err)
+	}
+	if len(dec.SubPositions) != 1 || dec.SubPositions[0].StrategyID != "long_call_short_stock" {
+		t.Fatalf("want one long_call_short_stock sub, got %+v", dec.SubPositions)
+	}
+}
+
+func TestPerTemplate_ShortPutShortStock(t *testing.T) {
+	opt := New(loadRulebook(t))
+	dec, err := opt.Optimize(defaultFacts(), []WorkingLeg{shortStock100(), shortPut("SP", 100.0)})
+	if err != nil {
+		t.Fatalf("Optimize: %v", err)
+	}
+	if len(dec.SubPositions) != 1 || dec.SubPositions[0].StrategyID != "short_put_short_stock" {
+		t.Fatalf("want one short_put_short_stock sub, got %+v", dec.SubPositions)
+	}
+}
+
+// TestExcessStock_CoveredCallWithStockResidual (epic test 6): 1000 shares + 5
+// short calls. The covered_call sub-position absorbs 500 shares + 5 contracts;
+// the remaining 500 shares surface as ErrStockResidualUnsupported. The partial
+// decomposition still contains the covered_call sub and its attribution.
+func TestExcessStock_CoveredCallWithStockResidual(t *testing.T) {
+	opt := New(loadRulebook(t))
+	stock := WorkingLeg{
+		ID: "LS",
+		Leg: engine.Leg{
+			Side: engine.Long, Kind: engine.StockKind, Shares: 1000.0, Mult: 1.0,
+			Underlying: "XYZ",
+		},
+		OpenShares: 1000.0,
+	}
+	sc := shortCall("SC", 100.0)
+	sc.OpenQty = 5.0
+	dec, err := opt.Optimize(defaultFacts(), []WorkingLeg{stock, sc})
+	var stockErr *ErrStockResidualUnsupported
+	if !errors.As(err, &stockErr) {
+		t.Fatalf("want *ErrStockResidualUnsupported, got %T %v", err, err)
+	}
+	if stockErr.OpenShares != 500.0 || stockErr.LegID != "LS" {
+		t.Fatalf("residual err fields: %+v", stockErr)
+	}
+	if len(dec.SubPositions) != 1 || dec.SubPositions[0].StrategyID != "covered_call" {
+		t.Fatalf("want covered_call in partial decomposition, got %+v", dec.SubPositions)
+	}
+	attr := dec.Attributions["LS"]
+	if len(attr) != 1 || attr[0].SharesUsed != 500.0 {
+		t.Fatalf("LS attribution: %+v", attr)
+	}
+}
+
+// TestExactCoveredCallPlusNakedLong (epic test 9): 100 shares + 1 sc + 1
+// lonely long call. covered_call consumes the stock + sc; the lonely long
+// call is scored via residual completion. No stock residual.
+func TestExactCoveredCallPlusNakedLong(t *testing.T) {
+	opt := New(loadRulebook(t))
+	legs := []WorkingLeg{
+		longStock100(),
+		shortCall("SC", 100.0),
+		longCall("LC", 110.0),
+	}
+	dec, err := opt.Optimize(defaultFacts(), legs)
+	if err != nil {
+		t.Fatalf("Optimize: %v", err)
+	}
+	var coveredCall, nakedLong int
+	for _, sp := range dec.SubPositions {
+		switch sp.StrategyID {
+		case "covered_call":
+			coveredCall++
+		case "long_option_short_dated":
+			nakedLong++
+		}
+	}
+	if coveredCall != 1 || nakedLong != 1 {
+		t.Fatalf("want 1 covered_call + 1 naked long, got covered=%d naked=%d (subs=%+v)",
+			coveredCall, nakedLong, dec.SubPositions)
+	}
+}
+
+// TestPartialCoverageRemainderStaysInState: 250 shares + 1 sc (mult=100).
+// covered_call consumes 100 shares + 1 contract; remaining 150 shares trigger
+// *ErrStockResidualUnsupported with OpenShares == 150. The sub-position
+// covered_call is still recorded.
+func TestPartialCoverageRemainderStaysInState(t *testing.T) {
+	opt := New(loadRulebook(t))
+	stock := WorkingLeg{
+		ID: "LS",
+		Leg: engine.Leg{
+			Side: engine.Long, Kind: engine.StockKind, Shares: 250.0, Mult: 1.0,
+			Underlying: "XYZ",
+		},
+		OpenShares: 250.0,
+	}
+	dec, err := opt.Optimize(defaultFacts(), []WorkingLeg{stock, shortCall("SC", 100.0)})
+	var stockErr *ErrStockResidualUnsupported
+	if !errors.As(err, &stockErr) {
+		t.Fatalf("want *ErrStockResidualUnsupported, got %T %v", err, err)
+	}
+	if stockErr.OpenShares != 150.0 {
+		t.Fatalf("residual OpenShares: want 150, got %g", stockErr.OpenShares)
+	}
+	if len(dec.SubPositions) != 1 || dec.SubPositions[0].StrategyID != "covered_call" {
+		t.Fatalf("want covered_call recorded, got %+v", dec.SubPositions)
+	}
+}
+
+// TestCollarVsStrangleConflict (epic test 11): LS=100sh + 1 LP + 1 SC + 1 SP.
+// Two decompositions consume all stock:
+//
+//	A. collar(lp+sc+ls) + naked sp
+//	B. protective_put(lp+ls) + short_strangle_or_straddle(sp+sc)
+//
+// Both fixtures must consume all shares (no residual error). The optimizer
+// picks the cheaper one; we only assert there's no error and that one of the
+// two well-formed structures wins.
+func TestCollarVsStrangleConflict(t *testing.T) {
+	opt := New(loadRulebook(t))
+	cases := []struct {
+		name string
+		legs []WorkingLeg
+	}{
+		{
+			name: "caseA",
+			legs: []WorkingLeg{
+				longStock100(),
+				longPut("LP", 95.0),
+				shortCall("SC", 105.0),
+				shortPut("SP", 90.0),
+			},
+		},
+		{
+			name: "caseB",
+			legs: []WorkingLeg{
+				longStock100(),
+				longPut("LP", 95.0),
+				shortCall("SC", 105.0),
+				shortPut("SP", 95.0),
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dec, err := opt.Optimize(defaultFacts(), tc.legs)
+			if err != nil {
+				t.Fatalf("%s Optimize: %v", tc.name, err)
+			}
+			if attr, ok := dec.Attributions["LS"]; !ok {
+				t.Fatalf("%s: LS has no attribution (stock not consumed)", tc.name)
+			} else {
+				var consumed float64
+				for _, a := range attr {
+					consumed += a.SharesUsed
+				}
+				if consumed != 100.0 {
+					t.Fatalf("%s: LS shares consumed = %g, want 100", tc.name, consumed)
+				}
+			}
+			// Both decompositions must absorb the stock via some coverage
+			// rule (collar / protective_put / covered_call / conversion).
+			// The specific winner depends on the engine's price-dependent
+			// formulas — what matters here is that the optimizer never
+			// leaves stock stranded when at least one coverage path fits.
+			var hasCoverage bool
+			for _, sp := range dec.SubPositions {
+				switch sp.StrategyID {
+				case "collar", "protective_put", "conversion", "covered_call":
+					hasCoverage = true
+				}
+			}
+			if !hasCoverage {
+				t.Fatalf("%s: expected a stock-coverage rule in subs, got %+v", tc.name, dec.SubPositions)
+			}
+		})
+	}
+}
